@@ -1,0 +1,377 @@
+{
+  "4192": {
+    "abbreviation": "NDNSW",
+    "explanation": "NET DOWN SURFACE SW FLUX",
+    "unit": "W/m^2"
+  },
+  "4198": {
+    "abbreviation": "SWDIR",
+    "explanation": "DIRECT SW FLUX (ON RHO LEVELS)",
+    "unit": "W/m^2"
+  },
+  "4199": {
+    "abbreviation": "SWDIF",
+    "explanation": "DIFFUSE SW FLUX (ON RHO LEVELS)",
+    "unit": "W/m^2"
+  },
+  "4200": {
+    "abbreviation": "TDSWS",
+    "explanation": "TOTAL DOWNWARD SURFACE SW FLUX",
+    "unit": "W/m^2"
+  },
+  "5192": {
+    "abbreviation": "NDNLW",
+    "explanation": "NET DOWN SURFACE LW RAD FLUX",
+    "unit": "W/m^2"
+  },
+  "5194": {
+    "abbreviation": "OULWT",
+    "explanation": "OUTGOING LW RAD FLUX (TOA)",
+    "unit": "W/m^2"
+  },
+  "5196": {
+    "abbreviation": "DLWS",
+    "explanation": "DOWNWARD LW RAD FLUX(SURFACE)",
+    "unit": "W/m^2"
+  },
+  "1009": {
+    "abbreviation": "NCPCP",
+    "explanation": "Large-Scale Precipitation (non-convective)",
+    "unit": "kg/m^2"
+  },
+  "1015": {
+    "abbreviation": "SNOL",
+    "explanation": "Large-Scale Snow",
+    "unit": "kg/m^2"
+  },
+  "1054": {
+    "abbreviation": "LSPRATE",
+    "explanation": "Large Scale Precipitation Rate",
+    "unit": "kg/m^2/s"
+  },
+  "1059": {
+    "abbreviation": "LSSRATE",
+    "explanation": "Large Scale Snowfall Rate",
+    "unit": "m/s"
+  },
+  "3196": {
+    "abbreviation": "HPBLA",
+    "explanation": "BOUNDARY LAYER DEPTH AFTER B. LAYER",
+    "unit": "m"
+  },
+  "193": {
+    "abbreviation": "HFSOIL",
+    "explanation": "HEAT FLUX FROM SURF TO DEEP SOIL LEV 1",
+    "unit": "W/m^2"
+  },
+  "7192": {
+    "abbreviation": "LLRIB",
+    "explanation": "LOWEST LAYER BULK RICHARDSON Number",
+    "unit": "-"
+  },
+  "2002": {
+    "abbreviation": "UGRD",
+    "explanation": "U-Component of Wind",
+    "unit": "m/s"
+  },
+  "2003": {
+    "abbreviation": "VGRD",
+    "explanation": "V-Component of Wind",
+    "unit": "m/s"
+  },
+  "194": {
+    "abbreviation": "HFSFC",
+    "explanation": "SURFACE HEAT FLUX",
+    "unit": "W/m^2"
+  },
+  "2194": {
+    "abbreviation": "XBLWS",
+    "explanation": "X-COMP OF SURF & BL WIND STRESS",
+    "unit": "N/m^2"
+  },
+  "2195": {
+    "abbreviation": "YBLWS",
+    "explanation": "Y-COMP OF SURF & BL WIND STRESS",
+    "unit": "N/m^2"
+  },
+  "10": {
+    "abbreviation": "LHTFL",
+    "explanation": "Latent Heat Net Flux",
+    "unit": "W/m^2"
+  },
+  "0": {
+    "abbreviation": "TMP",
+    "explanation": "surface Temperature",
+    "unit": "K"
+  },
+  "5": {
+    "abbreviation": "TMIN",
+    "explanation": "Minimum Temperature",
+    "unit": "K"
+  },
+  "4": {
+    "abbreviation": "TMAX",
+    "explanation": "Maximum Temperature",
+    "unit": "K"
+  },
+  "1000": {
+    "abbreviation": "SPFH",
+    "explanation": "Specific Humidity",
+    "unit": "kg/kg"
+  },
+  "1196": {
+    "abbreviation": "TOMFS",
+    "explanation": "TOTAL SURF MOIST FLUX PER TIME STEP",
+    "unit": "kg/m^2/TS"
+  },
+  "1001": {
+    "abbreviation": "RH",
+    "explanation": "Relative Humidity",
+    "unit": "%"
+  },
+  "19000": {
+    "abbreviation": "VIS",
+    "explanation": "Visibility",
+    "unit": "m"
+  },
+  "19193": {
+    "abbreviation": "FOGFR",
+    "explanation": "FOG FRACTION",
+    "unit": "%"
+  },
+  "6": {
+    "abbreviation": "DPT",
+    "explanation": "Dew Point Temperature",
+    "unit": "K"
+  },
+  "19194": {
+    "abbreviation": "PVIS5",
+    "explanation": "PROBABILITY OF VISIBILITY LESS THAN 5KM",
+    "unit": "%"
+  },
+  "198": {
+    "abbreviation": "15TL",
+    "explanation": "TL of 1.5M",
+    "unit": "-"
+  },
+  "1193": {
+    "abbreviation": "15QT",
+    "explanation": "QT of 1.5M",
+    "unit": "-"
+  },
+  "19192": {
+    "abbreviation": "VISIP",
+    "explanation": "VISIBILITY AT 1.5M(INCL PRECIP)",
+    "unit": "m"
+  },
+  "199": {
+    "abbreviation": "SHFLT",
+    "explanation": "SURFACE SENSIBLE HEAT FLUX ON TILES",
+    "unit": "W/m^2"
+  },
+  "19195": {
+    "abbreviation": "HTBM",
+    "explanation": "TURBULENT MIXING HEIGHT AFTER B. LAYER",
+    "unit": "m"
+  },
+  "6196": {
+    "abbreviation": "SCST",
+    "explanation": "STRATOCUM. OVER STABLE BL INDICATOR",
+    "unit": "%"
+  },
+  "6197": {
+    "abbreviation": "DSCNC",
+    "explanation": "DECOUPLED SC. NOT OVER CU. INDICATOR",
+    "unit": "%"
+  },
+  "6198": {
+    "abbreviation": "DSCOC",
+    "explanation": "DECOUPLED SC. OVER CU. INDICATOR",
+    "unit": "%"
+  },
+  "5198": {
+    "abbreviation": "NETTL",
+    "explanation": "SURFACE NET RADIATION ON TILES",
+    "unit": "W/m^2"
+  },
+  "201": {
+    "abbreviation": "STOT",
+    "explanation": "SURFACE TEMP ON TILES",
+    "unit": "K"
+  },
+  "200195": {
+    "abbreviation": "HCNP",
+    "explanation": "CANOPY HEIGHT ON PFTS",
+    "unit": "m"
+  },
+  "200196": {
+    "abbreviation": "WCNP",
+    "explanation": "CANOPY WATER ON PFTS",
+    "unit": "Kg/m^2"
+  },
+  "200197": {
+    "abbreviation": "T15T",
+    "explanation": "1.5m TEMPERATURE OVER TILES",
+    "unit": "K"
+  },
+  "200198": {
+    "abbreviation": "SH15",
+    "explanation": "1.5m SPECIFIC HUMIDITY OVER TILES",
+    "unit": "kg/kg"
+  },
+  "6199": {
+    "abbreviation": "HDLB",
+    "explanation": "HEIGHT OF DECOUPLED LAYER BASE",
+    "unit": "m"
+  },
+  "200199": {
+    "abbreviation": "STCP",
+    "explanation": "STOMATAL CONDUCTANCE ON PFTS",
+    "unit": "W/m^2"
+  },
+  "2021": {
+    "abbreviation": "MAXGUST",
+    "explanation": "Maximum Wind Speed",
+    "unit": "m/s"
+  },
+  "3193": {
+    "abbreviation": "CBLT",
+    "explanation": "COMBINED BOUNDARY LAYER TYPE",
+    "unit": "-"
+  },
+  "1016": {
+    "abbreviation": "SNOM",
+    "explanation": "Snow Melt",
+    "unit": "kg/m^2"
+  },
+  "200203": {
+    "abbreviation": "SMCL",
+    "explanation": "SOIL MOISTURE CONTENT IN A LAYER",
+    "unit": "Kg/m2/TS"
+  },
+  "200002": {
+    "abbreviation": "TSOIL",
+    "explanation": "Soil Temperature(Validation to deprecate)",
+    "unit": "K"
+  },
+  "200204": {
+    "abbreviation": "ROFR",
+    "explanation": "SURFACE RUNOFF RATE",
+    "unit": "Kg/m^2/S"
+  },
+  "200205": {
+    "abbreviation": "SROFR",
+    "explanation": "SUB-SURFACE RUNOFF RATE",
+    "unit": "kg/m^2/S"
+  },
+  "6209": {
+    "abbreviation": "VLCDC",
+    "explanation": "Very Low Cloud Cover",
+    "unit": "%"
+  },
+  "6003": {
+    "abbreviation": "LCDC",
+    "explanation": "Low Cloud Cover",
+    "unit": "%"
+  },
+  "6004": {
+    "abbreviation": "MCDC",
+    "explanation": "Medium Cloud Cover",
+    "unit": "%"
+  },
+  "6005": {
+    "abbreviation": "HCDC",
+    "explanation": "High Cloud Cover",
+    "unit": "%"
+  },
+  "6210": {
+    "abbreviation": "CB25",
+    "explanation": "CLOUD BASE FOR >2.5 OCTA KFT",
+    "unit": "%"
+  },
+  "6211": {
+    "abbreviation": "CB45",
+    "explanation": "CLOUD BASE FOR >4.5 OCTA KFT",
+    "unit": "%"
+  },
+  "6212": {
+    "abbreviation": "TCAR",
+    "explanation": "TOTAL CLOUD AMOUNT - RANDOM OVERLAP",
+    "unit": "%"
+  },
+  "6213": {
+    "abbreviation": "TCAM",
+    "explanation": "TOTAL CLOUD AMOUNT - MAX/RANDOM OVERLP",
+    "unit": "%"
+  },
+  "6214": {
+    "abbreviation": "CFB10",
+    "explanation": "CLOUD FRACTION BELOW 1000FT ASL",
+    "unit": "%"
+  },
+  "6215": {
+    "abbreviation": "LCB",
+    "explanation": "LOW CLOUD BASE(FT ASL)",
+    "unit": "ft"
+  },
+  "6216": {
+    "abbreviation": "WBFLH",
+    "explanation": "WET BULB FREEZING LEVEL HEIGHT",
+    "unit": "m"
+  },
+  "6217": {
+    "abbreviation": "TCTH",
+    "explanation": "TOTAL CLOUD TOP HEIGHT",
+    "unit": "kft"
+  },
+  "2197": {
+    "abbreviation": "50MUmin",
+    "explanation": "50m-WIND U-COMPONENT",
+    "unit": "m/s"
+  },
+  "2198": {
+    "abbreviation": "50MVmin",
+    "explanation": "50m-WIND V-COMPONENT",
+    "unit": "m/s"
+  },
+  "3001": {
+    "abbreviation": "PRMSL",
+    "explanation": "Pressure Reduced to MSL",
+    "unit": "Pa"
+  },
+  "1197": {
+    "abbreviation": "SNOAL",
+    "explanation": "SNOW AMOUNT OVER LAND AFT TSTP",
+    "unit": "m"
+  },
+  "3018": {
+    "abbreviation": "HPBL",
+    "explanation": "Planetary Boundary Layer Height",
+    "unit": "m"
+  },
+  "200001": {
+    "abbreviation": "SFCR",
+    "explanation": "Surface Roughness",
+    "unit": "m"
+  },
+  "200000": {
+    "abbreviation": "LAND",
+    "explanation": "Land Cover (0=sea, 1=land)",
+    "unit": "-"
+  },
+  "100192": {
+    "abbreviation": "FRICE",
+    "explanation": "FRACTION OF SEA ICE",
+    "unit": "%"
+  },
+  "3006": {
+    "abbreviation": "DIST",
+    "explanation": "Orography",
+    "unit": "m"
+  },
+  "3000": {
+    "abbreviation": "PRES",
+    "explanation": "Surface Pressure",
+    "unit": "Pa"
+  }
+}

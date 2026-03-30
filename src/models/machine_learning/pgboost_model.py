@@ -1,0 +1,225 @@
+import torch 
+from pathlib import Path
+from pgbm.torch import PGBM 
+
+import pandas as pd 
+import numpy as np 
+
+from typing import Union, Optional, Iterable, Dict
+
+from src.core.base_model import BaseForecaster
+from src.core.moment_matching import mu_std_to_dist_params
+from src.core.forecast_params import ForecastParams
+from src.models.machine_learning.registry import MODEL_REGISTRY
+
+def mseloss_objective(yhat, y, sample_weight=None):
+    gradient = (yhat - y)
+    hessian = torch.ones_like(yhat)
+    
+    if sample_weight is not None: 
+        sample_weight = torch.tensor(
+            sample_weight, 
+            dtype=gradient.dtype, 
+            device=gradient.device
+            ) 
+        gradient = gradient * sample_weight 
+        hessian = hessian * sample_weight 
+
+    return gradient, hessian
+
+def rmseloss_metric(yhat, y, sample_weight=None):
+    squared_error = torch.square(yhat - y)
+    
+    if sample_weight is not None: 
+        sample_weight = torch.tensor(
+            sample_weight, 
+            dtype=squared_error.dtype, 
+            device=squared_error.device
+            ) 
+        weighted_mse = torch.sum(squared_error * sample_weight) / torch.sum(sample_weight)
+    else: 
+        weighted_mse = torch.mean(squared_error) 
+    
+    return torch.sqrt(weighted_mse) 
+
+
+# Distributions supported by PGBM's optimize_distribution
+_PGBM_SUPPORTED_DISTRIBUTIONS = [
+    'normal', 
+    'laplace', 
+    'lognormal', 
+    'gamma', 
+    'gumbel',
+    'weibull'
+]
+
+# Mapping from PGBM distribution names to ParametricDistribution registry names
+# (PGBM uses the same names as our registry for these distributions)
+_PGBM_TO_FORECAST_DIST = {d: d for d in _PGBM_SUPPORTED_DISTRIBUTIONS}
+
+
+class PGBMModel: 
+    def __init__(
+        self, 
+        hyperparameter=None 
+    ): 
+        
+        self.hyperparameter = {
+            "device": 'gpu' if torch.cuda.is_available() else 'cpu', 
+            "verbose": 1
+        }
+        if hyperparameter:
+            self.hyperparameter.update(**hyperparameter) 
+            
+        self.model = PGBM() 
+    
+    def fit(self, train_X: np.ndarray, train_y: np.ndarray) -> 'PGBMModel': 
+        self.model.train(
+            train_set=(train_X, train_y),
+            objective=mseloss_objective, 
+            metric=rmseloss_metric, 
+            params=self.hyperparameter
+        ) 
+        return self 
+    
+    def predict(self, X: np.ndarray):
+        """
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: (mu, std) of shape (T,) each.
+        """
+        forecast = self.model.predict_dist(
+            X=X,
+            n_forecasts=0, 
+            parallel=True, 
+            output_sample_statistics=True 
+        ) 
+        _, mu, var = forecast
+        if torch.is_tensor(mu): 
+            mu = mu.cpu().numpy() 
+        if torch.is_tensor(var): 
+            var = var.cpu().numpy()
+            
+        std = np.sqrt(np.maximum(var, 0)) 
+        
+        return mu, std
+    
+    def save(self, file):
+        self.model.save(filename=file)
+    
+    def load(self, file, device="cpu"):
+        self.model.load(filename=file, device=device)
+
+@MODEL_REGISTRY.register_model(name="pgbm")
+class PGBMForecaster(BaseForecaster):
+    """
+    PGBM-based probabilistic forecaster.
+
+    PGBM predicts the mean and variance of the target distribution.
+    If no distribution is specified in hyperparameters, the best distribution
+    is automatically selected via PGBM's optimize_distribution() using CRPS.
+
+    Supported distributions (via hyperparameter 'Dist'):
+        'normal', 'laplace', 'lognormal', 'gamma', 'gumbel', 'weibull'
+
+    forecast() returns a ParametricDistribution with the selected distribution.
+    """
+    def __init__(
+        self,
+        dataset: pd.DataFrame,
+        y_col: Union[str, int],
+        x_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
+        hyperparameter: Optional[Dict] = None,
+        enable_logging: bool = False,
+        save_dir: Optional[str] = None,
+        verbose: bool = False,
+        ):
+
+        super().__init__(
+            dataset,
+            y_col,
+            x_cols,
+            hyperparameter,
+            enable_logging,
+            save_dir,
+            verbose,
+        )
+        
+        # Validate distribution if pre-specified
+        if hyperparameter and "Dist" in hyperparameter:
+            dist_str = hyperparameter["Dist"]
+            if dist_str not in _PGBM_SUPPORTED_DISTRIBUTIONS:
+                raise ValueError(
+                    f"Distribution '{dist_str}' is not supported for PGBM. "
+                    f"Pick from: {_PGBM_SUPPORTED_DISTRIBUTIONS}."
+                )
+        
+        self._forecast_dist_name: Optional[str] = (
+            hyperparameter.get("Dist") if hyperparameter else None
+        )
+        
+        self.model = PGBMModel(hyperparameter) 
+        
+    def fit(self) -> 'PGBMForecaster':
+        self.model.fit(
+            train_X=self.X,
+            train_y=self.y,
+        )
+
+        # Auto-select best distribution if not pre-specified
+        if self._forecast_dist_name is None:
+            best_dist, _ = self.model.model.optimize_distribution(
+                X=self.X,
+                y=self.y,
+                distributions=_PGBM_SUPPORTED_DISTRIBUTIONS
+            )
+            self._forecast_dist_name = best_dist
+            self.hyperparameter["Dist"] = best_dist
+        
+        self.is_fitted_ = True 
+        self._save_info()
+        
+        return self
+    
+    def forecast(self, X: np.ndarray, target_index: pd.Index) -> ForecastParams:
+        """
+        Generate probabilistic forecast.
+
+        Args:
+            X: Feature matrix of shape (T, n_features).
+            target_index: Time index of shape (T,) for the forecast period.
+
+        Returns:
+            ForecastParams with native params via moment matching.
+        """
+        mu, std = self.model.predict(X)
+        dist_name = self._forecast_dist_name or "normal"
+        params = mu_std_to_dist_params(dist_name, mu, std)
+        return ForecastParams(
+            dist_name=dist_name,
+            params=params,
+            axis="cross_section",
+        )
+    
+    def _save_model_specific(self, model_path: Path) -> Path:
+        """
+        Save PGBM model using PGBM native format.
+        
+        Args:
+            model_path: Base path without extension for saving the model
+            
+        Returns:
+            Path: Complete path to the saved model file with .pt extension
+            
+        Note:
+            Official documentation: https://pgbm.readthedocs.io/en/latest/function_reference.html#pgbm.torch.PGBM.train
+        """
+        sv_path = model_path.with_suffix(".pt") 
+        self.model.save(file=sv_path)
+        return sv_path
+    
+    def _load_model_specific(self, model_path: Path, device="cpu") -> None:
+        self.model.load(
+            file=model_path.with_suffix(".pt"),
+            device=device
+        )
+        return

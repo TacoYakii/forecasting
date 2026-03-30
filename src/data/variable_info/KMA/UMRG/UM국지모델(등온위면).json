@@ -1,0 +1,32 @@
+{
+  "2225": {
+    "abbreviation": "UTHETA",
+    "explanation": "U COMPONENT WIND AT THETA SURFACE",
+    "unit": "m/s"
+  },
+  "2226": {
+    "abbreviation": "VTHETA",
+    "explanation": "V COMPONENT WIND AT THETA SURFACE",
+    "unit": "m/s"
+  },
+  "2227": {
+    "abbreviation": "PTHETA",
+    "explanation": "PRESSURE AT THETA SURFACE",
+    "unit": "Pa"
+  },
+  "1235": {
+    "abbreviation": "QTHETA",
+    "explanation": "SPECIFIC HUMIDITY AT THETA SURFACE",
+    "unit": "kg/kg"
+  },
+  "1236": {
+    "abbreviation": "RHTHETA",
+    "explanation": "RELATIVE HUMIDITY AT THETA SURFACE",
+    "unit": "%"
+  },
+  "2229": {
+    "abbreviation": "PVTHETA",
+    "explanation": "POTENTIAL VORTICITY AT THETA SURFACE",
+    "unit": "km^2/kg/s"
+  }
+}

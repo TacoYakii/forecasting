@@ -1,0 +1,42 @@
+{
+  "2009": {
+    "abbreviation": "DZDT",
+    "explanation": "Vertical Velocity (Pressure Level)",
+    "unit": "m/s"
+  },
+  "3005": {
+    "abbreviation": "HGT",
+    "explanation": "Geopotential Height (Pressure Level)",
+    "unit": "gpm"
+  },
+  "0": {
+    "abbreviation": "TMP",
+    "explanation": "Temperature (Pressure Level)",
+    "unit": "K"
+  },
+  "2002": {
+    "abbreviation": "UGRD",
+    "explanation": "U-component of wind",
+    "unit": "m/s"
+  },
+  "2003": {
+    "abbreviation": "VGRD",
+    "explanation": "V-component of wind",
+    "unit": "m/s"
+  },
+  "1001": {
+    "abbreviation": "RH",
+    "explanation": "Relative Humidity",
+    "unit": "%"
+  },
+  "1194": {
+    "abbreviation": "RHICE",
+    "explanation": "RH wrt. Ice ON PLEV",
+    "unit": "%"
+  },
+  "200": {
+    "abbreviation": "WBPT",
+    "explanation": "Wet Bulb Potential Temperature",
+    "unit": "K"
+  }
+}

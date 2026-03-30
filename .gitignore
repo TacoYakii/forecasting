@@ -1,0 +1,34 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# NPM
+package-lock.json
+package.json
+
+# Dataset
+/data/**
+**/res/
+*.csv
+
+# IDE / tool configs
+.claude/
+.kilocode/
+.vscode/
+
+# Other
+PARK/
+nMAPE_test/
+lightning_logs/
+.DS_Store
+*.png
+*.pkl
+*.log
+*.csv
