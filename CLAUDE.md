@@ -2,6 +2,9 @@
 
 Python 3.13 based probabilistic wind power forecasting system. 
 
+## Git
+- Do NOT append `Co-Authored-By` lines to commit messages
+
 ## Code Style
 
 ### Linting (ruff)
