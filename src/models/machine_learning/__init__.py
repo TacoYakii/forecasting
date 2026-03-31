@@ -4,10 +4,10 @@ Machine Learning Models Package
 This package provides tabular ML forecasting models for wind power prediction,
 all implementing a unified interface through BaseForecaster or DeterministicForecaster.
 
-Individual models return a ForecastParams from forecast():
+Individual models return a ParametricForecastResult from forecast():
 - dist_name: Distribution identifier
-- params: Native distribution parameters (factory-key based)
-- axis: "cross_section" (T time points, single horizon)
+- params: Native distribution parameters, shape (T, 1)
+- basis_index: Time index for the forecast period
 
 Runner:
 - PerHorizonRunner: Wraps any model to train H independent per-horizon models,
@@ -39,7 +39,7 @@ from src.core.base_model import BaseModel, BaseForecaster, DeterministicForecast
 from src.core.base_deep_model import BaseDeepModel
 from src.core.forecast_distribution import ParametricDistribution, DISTRIBUTION_REGISTRY
 from src.core.moment_matching import mu_std_to_dist_params
-from src.core.forecast_params import ForecastParams
+from src.core.forecast_results import ParametricForecastResult
 from src.core.runner import PerHorizonRunner
 
 # Deterministic Models

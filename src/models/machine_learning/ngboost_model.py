@@ -8,7 +8,7 @@ import joblib
 from typing import Union, Optional, Iterable, Dict
 
 from src.core.base_model import BaseForecaster
-from src.core.forecast_params import ForecastParams
+from src.core.forecast_results import ParametricForecastResult
 from src.models.machine_learning.registry import MODEL_REGISTRY
 
 # Mapping from user-facing string names to ngboost distribution classes
@@ -126,7 +126,7 @@ class NGBoostForecaster(BaseForecaster):
         
         return self
     
-    def forecast(self, X: np.ndarray, target_index: pd.Index) -> ForecastParams:
+    def forecast(self, X: np.ndarray, target_index: pd.Index) -> ParametricForecastResult:
         """
         Generate probabilistic forecast.
 
@@ -135,14 +135,16 @@ class NGBoostForecaster(BaseForecaster):
             target_index: Time index of shape (T,) for the forecast period.
 
         Returns:
-            ForecastParams with native distribution parameters.
+            ParametricForecastResult with shape (T, 1).
         """
         pred_dist = self.model.predict(X)
         params = self._extract_native_params(pred_dist)
-        return ForecastParams(
+        # Reshape (T,) → (T, 1) for single-horizon result
+        params = {k: v.reshape(-1, 1) for k, v in params.items()}
+        return ParametricForecastResult(
             dist_name=self._forecast_dist_name,
             params=params,
-            axis="cross_section",
+            basis_index=target_index,
         )
 
     def _extract_native_params(self, pred_dist) -> Dict[str, np.ndarray]:

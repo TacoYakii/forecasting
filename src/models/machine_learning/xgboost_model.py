@@ -96,10 +96,10 @@ class XGBoostForecaster(DeterministicForecaster):
             target_index: Time index of shape (T,) for the forecast period.
 
         Returns:
-            ForecastParams with native params and axis="cross_section".
+            ParametricForecastResult with shape (T, 1).
         """
         mu = self.model.predict(X)
-        return self.build_forecast_params(mu, target_index)
+        return self.build_forecast_result(mu, target_index)
     
     def _save_model_specific(self, model_path: Path) -> Path:
         """

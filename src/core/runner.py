@@ -31,7 +31,6 @@ from tqdm.auto import tqdm
 
 from .base_model import BaseModel, BaseForecaster
 from .forecast_distribution import DISTRIBUTION_REGISTRY
-from .forecast_params import ForecastParams
 from .forecast_results import ParametricForecastResult
 
 if TYPE_CHECKING:
@@ -326,12 +325,14 @@ class RollingRunner:
         """
         Aggregate per-step outputs into a single result object.
 
+        All models return ForecastResult objects directly. This method
+        concatenates them along axis=0 (the basis/time dimension).
+
         Dispatch by return type:
-          - ForecastParams (horizon axis) → stack into ParametricForecastResult
-          - SampleForecastResult           → stack samples
-          - QuantileForecastResult         → merge quantile dicts
+          - ParametricForecastResult → concatenate params along axis=0
+          - SampleForecastResult     → concatenate samples along axis=0
+          - QuantileForecastResult   → concatenate quantile dicts along axis=0
         """
-        from src.core.forecast_params import ForecastParams
         from src.core.forecast_results import (
             ParametricForecastResult,
             QuantileForecastResult,
@@ -340,12 +341,11 @@ class RollingRunner:
 
         first = results[0]
 
-        if isinstance(first, ForecastParams):
-            # Stack ForecastParams (each has horizon-axis params) into (N, H)
+        if isinstance(first, ParametricForecastResult):
             param_keys = list(first.params.keys())
             stacked_params = {}
             for key in param_keys:
-                stacked_params[key] = np.stack(
+                stacked_params[key] = np.concatenate(
                     [r.params[key] for r in results], axis=0
                 )  # (N, H)
             return ParametricForecastResult(
@@ -484,18 +484,8 @@ class PerHorizonRunner(BaseModel):
         self._models: Dict[int, BaseForecaster] = {}
         self._datasets: Dict[int, pd.DataFrame] = {}
 
-        info = {
-            "runner_type": "PerHorizonRunner",
-            "data_dir": str(self.data_dir),
-            "model_name": model_name,
-            "horizons": self._horizons,
-            "n_horizons": len(self._horizons),
-            "dist_name": dist_name,
-            "n_jobs": n_jobs,
-        }
         super().__init__(
             hyperparameter=hyperparameter,
-            info=info,
             enable_logging=enable_logging,
             save_dir=save_dir,
             verbose=verbose,
@@ -604,17 +594,17 @@ class PerHorizonRunner(BaseModel):
     # Forecast
     # ------------------------------------------------------------------
 
-    def _extract_params(self, model: BaseForecaster, h: int) -> Tuple[ForecastParams, pd.Index]:
+    def _extract_result(self, model: BaseForecaster, h: int) -> Tuple[ParametricForecastResult, pd.Index]:
         """
-        Extract ForecastParams and forecast_index from a fitted per-horizon model.
+        Extract ParametricForecastResult and forecast_index from a fitted per-horizon model.
         """
         df = self._datasets[h]
         forecast_data = df.loc[self.forecast_period[0]:self.forecast_period[1]]
         forecast_X = forecast_data[model.x_cols].to_numpy()
         forecast_index = forecast_data.index
 
-        forecast_params = model.forecast(forecast_X, forecast_index)
-        return forecast_params, forecast_index
+        result = model.forecast(forecast_X, forecast_index)
+        return result, forecast_index
 
     def forecast(self) -> ParametricForecastResult:
         """
@@ -626,10 +616,10 @@ class PerHorizonRunner(BaseModel):
         if not self.is_fitted_:
             raise RuntimeError("Runner not fitted. Call fit() first.")
 
-        horizon_results: Dict[int, Tuple[ForecastParams, pd.Index]] = {}
+        horizon_results: Dict[int, Tuple[ParametricForecastResult, pd.Index]] = {}
         for h in self._horizons:
             model = self._models[h]
-            fp, forecast_index = self._extract_params(model, h)
+            fp, forecast_index = self._extract_result(model, h)
             horizon_results[h] = (fp, forecast_index)
 
         common_idx = horizon_results[self._horizons[0]][1]
@@ -671,15 +661,15 @@ class PerHorizonRunner(BaseModel):
             basis_index=common_idx,
         )
 
-    def forecast_horizon(self, h: int) -> ForecastParams:
+    def forecast_horizon(self, h: int) -> ParametricForecastResult:
         """
-        Get the ForecastParams for a single horizon.
+        Get the ParametricForecastResult for a single horizon.
 
         Args:
             h: Forecast horizon (1-indexed, must be in self.horizons).
 
         Returns:
-            ForecastParams for horizon h.
+            ParametricForecastResult with shape (T, 1) for horizon h.
         """
         if h not in self._models:
             raise ValueError(

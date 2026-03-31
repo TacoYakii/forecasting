@@ -1,30 +1,93 @@
 [project]
 name = "windpower-forecasting"
 version = "0.1.0"
+description = "Probabilistic wind power forecasting system"
+requires-python = "==3.13.*"
 dependencies = [
-    "dotenv>=0.9.9",
-    "ipywidgets>=8.1.8",
-    "metpy>=1.7.1",
+    # core scientific stack
+    "numpy>=2.1",
+    "pandas>=2.2",
+    "torch>=2.4",
+    "scipy>=1.14",
+
+    # ML models
+    "scikit-learn>=1.5",
+    "catboost>=1.2",
+    "ngboost>=0.5",
+    "xgboost>=3.0",
+    "pgbm>=2.3",
+
+    # deep time-series
     "neuralforecast>=3.1.6",
+
+    # foundation models
     "chronos-forecasting>=2.0",
     "uni2ts",
-    "jaxtyping",
-    "hydra",
+    "gluonts>=0.16",
+
+    # meteorological / geospatial
+    "metpy>=1.7.1",
+    "xarray>=2024.0",
+    "ecmwfapi",
+    "folium>=0.18",
+
+    # utilities
+    "tqdm>=4.66",
+    "joblib>=1.4",
+    "optuna>=4.0",
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+    "matplotlib>=3.9",
+    "pyyaml>=6.0",
+
+    # high-performance compute
+    "numba>=0.60",
+    "jax>=0.4",
 ]
 
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.setuptools]
+[tool.hatch.build.targets.wheel]
 packages = ["src"]
 
+# ── uv ───────────────────────────────────────
+[tool.uv]
+dev-dependencies = [
+    "ruff",
+    "ty",
+    "pytest",
+]
+
+# ── ty ───────────────────────────────────────
 [tool.ty.src]
 exclude = [
     "/data/**",
-    "**/etc/",
     "**/res/"
 ]
 
 [tool.ty.environment]
 python = ".venv/bin/python"
+
+# ── pytest ──────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+
+# ── ruff ─────────────────────────────────────
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "D"]
+ignore = ["D100", "D104"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]
+"notebooks/**" = ["D", "E"]

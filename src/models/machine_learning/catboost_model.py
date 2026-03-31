@@ -5,7 +5,7 @@ import numpy as np
 from typing import Union, Optional, Iterable, Dict
 
 from src.core.base_model import BaseForecaster
-from src.core.forecast_params import ForecastParams
+from src.core.forecast_results import ParametricForecastResult
 from src.models.machine_learning.registry import MODEL_REGISTRY
 
 class CatBoostModel: 
@@ -108,7 +108,7 @@ class CatBoostForecaster(BaseForecaster):
         
         return self
     
-    def forecast(self, X: np.ndarray, target_index: pd.Index) -> ForecastParams:
+    def forecast(self, X: np.ndarray, target_index: pd.Index) -> ParametricForecastResult:
         """
         Generate probabilistic forecast.
 
@@ -117,13 +117,16 @@ class CatBoostForecaster(BaseForecaster):
             target_index: Time index of shape (T,) for the forecast period.
 
         Returns:
-            ForecastParams with native params (Normal: loc, scale).
+            ParametricForecastResult with shape (T, 1).
         """
         mu, std = self.model.predict(X)
-        return ForecastParams(
+        return ParametricForecastResult(
             dist_name="normal",
-            params={"loc": mu, "scale": np.maximum(std, 1e-9)},
-            axis="cross_section",
+            params={
+                "loc": mu.reshape(-1, 1),
+                "scale": np.maximum(std, 1e-9).reshape(-1, 1),
+            },
+            basis_index=target_index,
         )
     
     def _save_model_specific(self, model_path: Path) -> Path:

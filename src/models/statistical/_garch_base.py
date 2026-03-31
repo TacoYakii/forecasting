@@ -24,7 +24,7 @@ from scipy.optimize import minimize
 from scipy.special import gammaln
 
 from src.core.base_model import BaseForecaster
-from src.core.forecast_params import ForecastParams
+from src.core.forecast_results import ParametricForecastResult
 from src.core.forecast_results import SampleForecastResult
 from src.models.statistical._primitives import GARCH
 
@@ -566,7 +566,7 @@ class GarchBase(BaseForecaster):
         self,
         horizon: int,
         x_future: Optional[np.ndarray] = None,
-    ) -> ForecastParams:
+    ) -> ParametricForecastResult:
         """
         Multi-step-ahead forecast from the current state.
 
@@ -579,7 +579,7 @@ class GarchBase(BaseForecaster):
                       If None, zeros are used.
 
         Returns:
-            ForecastParams with native params and axis="horizon".
+            ParametricForecastResult with shape (1, H).
         """
         if not self.is_fitted_:
             raise RuntimeError("Call fit() before forecast().")
@@ -615,22 +615,26 @@ class GarchBase(BaseForecaster):
         mu = self._undifference_mean(mu_diff)
         sigma = self._undifference_sigma(sigma_diff)
 
-        # Build native params
+        # Build native params — reshape to (1, H)
         dist_name = self.config.distribution
         if dist_name == "studentT" and self._df is not None:
             df = self._df
             params = {
-                "loc": mu,
-                "scale": sigma * np.sqrt((df - 2.0) / df),
-                "df": np.full_like(mu, df),
+                "loc": mu.reshape(1, -1),
+                "scale": (sigma * np.sqrt((df - 2.0) / df)).reshape(1, -1),
+                "df": np.full_like(mu, df).reshape(1, -1),
             }
         else:
-            params = {"loc": mu, "scale": np.maximum(sigma, 1e-9)}
+            params = {
+                "loc": mu.reshape(1, -1),
+                "scale": np.maximum(sigma, 1e-9).reshape(1, -1),
+            }
 
-        return ForecastParams(
+        basis_index = pd.Index([self.index[-1]])
+        return ParametricForecastResult(
             dist_name=dist_name,
             params=params,
-            axis="horizon",
+            basis_index=basis_index,
         )
 
     # ------------------------------------------------------------------

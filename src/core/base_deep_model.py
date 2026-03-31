@@ -28,7 +28,7 @@ from neuralforecast import NeuralForecast
 from neuralforecast.losses.pytorch import DistributionLoss, MQLoss, IQLoss, MAE
 
 from src.core.base_model import BaseForecaster
-from src.core.forecast_params import ForecastParams
+from src.core.forecast_results import ParametricForecastResult
 from src.core.forecast_results import QuantileForecastResult
 
 
@@ -303,19 +303,39 @@ class BaseDeepModel(BaseForecaster):
     # Predict
     # ------------------------------------------------------------------
 
-    def forecast(self) -> Union[ForecastParams, QuantileForecastResult]:
+    def forecast(
+        self,
+        future_X: Optional[np.ndarray] = None,
+        future_index: Optional[pd.DatetimeIndex] = None,
+    ) -> Union[ParametricForecastResult, QuantileForecastResult]:
         """
         Generate probabilistic forecast.
 
         Uses the full training dataset as context and calls NeuralForecast.predict().
 
+        Args:
+            future_X: Exogenous features for the forecast horizon,
+                shape (prediction_length, n_features). Required if model
+                was trained with exogenous features (x_cols).
+            future_index: Time index for the forecast horizon,
+                shape (prediction_length,). Required together with future_X.
+
         Returns:
-            ForecastParams (DistributionLoss) or QuantileForecastResult (MQLoss/IQLoss).
+            ParametricForecastResult (DistributionLoss) or QuantileForecastResult (MQLoss/IQLoss).
         """
         if self._nf is None:
             raise RuntimeError("Model not trained. Call fit() first.")
 
+        futr_df = None
+        feat_cols = self._get_feature_cols(self.dataset)
+        if future_X is not None and future_index is not None and feat_cols:
+            futr_dict = {"unique_id": _SERIES_ID, "ds": future_index}
+            for i, col in enumerate(feat_cols):
+                futr_dict[col] = future_X[:, i]
+            futr_df = pd.DataFrame(futr_dict).reset_index(drop=True)
+
         forecast_df = self._nf.predict(
+            futr_df=futr_df,
             level=self._level,
         )
 
@@ -329,7 +349,7 @@ class BaseDeepModel(BaseForecaster):
         context_X: Optional[np.ndarray] = None,
         future_X: Optional[np.ndarray] = None,
         future_index: Optional[pd.DatetimeIndex] = None,
-    ) -> Union[ForecastParams, QuantileForecastResult]:
+    ) -> Union[ParametricForecastResult, QuantileForecastResult]:
         """
         Single-step prediction from a context window.
 
@@ -342,7 +362,7 @@ class BaseDeepModel(BaseForecaster):
             future_index: Time index for future period.
 
         Returns:
-            ForecastParams (DistributionLoss) or QuantileForecastResult (MQLoss/IQLoss).
+            ParametricForecastResult (DistributionLoss) or QuantileForecastResult (MQLoss/IQLoss).
         """
         if self._nf is None:
             raise RuntimeError("Model not trained. Call fit() first.")
@@ -378,12 +398,12 @@ class BaseDeepModel(BaseForecaster):
 
     def _convert_forecast(
         self, forecast_df: pd.DataFrame,
-    ) -> Union[ForecastParams, QuantileForecastResult]:
+    ) -> Union[ParametricForecastResult, QuantileForecastResult]:
         """
         Convert NeuralForecast output DataFrame to a ForecastResult.
 
         Dispatches by loss type:
-          - DistributionLoss → ForecastParams (native params)
+          - DistributionLoss → ParametricForecastResult (native params)
           - MQLoss / IQLoss  → QuantileForecastResult (quantile arrays)
 
         NeuralForecast returns columns like:
@@ -401,7 +421,7 @@ class BaseDeepModel(BaseForecaster):
             else self._prediction_length
         )
 
-        # --- DistributionLoss: return ForecastParams ---
+        # --- DistributionLoss: return ParametricForecastResult ---
         resolved = getattr(self, "_resolved_loss_type", None)
         if resolved == "distribution":
             return self._convert_params(forecast_df, model_name, basis_index, H)
@@ -425,9 +445,9 @@ class BaseDeepModel(BaseForecaster):
         model_name: str,
         basis_index: pd.Index,
         H: int,
-    ) -> ForecastParams:
+    ) -> ParametricForecastResult:
         """
-        Convert DistributionLoss output (with return_params=True) to ForecastParams.
+        Convert DistributionLoss output (with return_params=True) to ParametricForecastResult.
 
         Extracts native distribution parameters directly from the forecast DataFrame
         columns (e.g. ModelName-loc, ModelName-scale, ModelName-df).
@@ -474,10 +494,12 @@ class BaseDeepModel(BaseForecaster):
             params = {"loc": mu, "scale": sigma}
             dist_name = "normal"  # fallback to normal if params unavailable
 
-        return ForecastParams(
+        # Reshape (H,) → (1, H) for single-origin result
+        params = {k: v.reshape(1, -1) for k, v in params.items()}
+        return ParametricForecastResult(
             dist_name=dist_name,
             params=params,
-            axis="horizon",
+            basis_index=basis_index,
         )
 
     def _convert_quantile(

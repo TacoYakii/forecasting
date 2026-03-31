@@ -9,7 +9,7 @@ from typing import Union, Optional, Iterable, Dict
 
 from src.core.base_model import BaseForecaster
 from src.core.moment_matching import mu_std_to_dist_params
-from src.core.forecast_params import ForecastParams
+from src.core.forecast_results import ParametricForecastResult
 from src.models.machine_learning.registry import MODEL_REGISTRY
 
 def mseloss_objective(yhat, y, sample_weight=None):
@@ -180,7 +180,7 @@ class PGBMForecaster(BaseForecaster):
         
         return self
     
-    def forecast(self, X: np.ndarray, target_index: pd.Index) -> ForecastParams:
+    def forecast(self, X: np.ndarray, target_index: pd.Index) -> ParametricForecastResult:
         """
         Generate probabilistic forecast.
 
@@ -189,15 +189,17 @@ class PGBMForecaster(BaseForecaster):
             target_index: Time index of shape (T,) for the forecast period.
 
         Returns:
-            ForecastParams with native params via moment matching.
+            ParametricForecastResult with shape (T, 1).
         """
         mu, std = self.model.predict(X)
         dist_name = self._forecast_dist_name or "normal"
         params = mu_std_to_dist_params(dist_name, mu, std)
-        return ForecastParams(
+        # Reshape (T,) → (T, 1) for single-horizon result
+        params = {k: v.reshape(-1, 1) for k, v in params.items()}
+        return ParametricForecastResult(
             dist_name=dist_name,
             params=params,
-            axis="cross_section",
+            basis_index=target_index,
         )
     
     def _save_model_specific(self, model_path: Path) -> Path:

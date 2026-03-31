@@ -70,7 +70,7 @@ class ChronosForecaster(BaseFoundationModel):
         self._pipeline = ChronosPipeline.from_pretrained(
             self._model_name_or_path,
             device_map=self._device,
-            torch_dtype=torch_dtype,
+            dtype=torch_dtype,
         )
 
     def _predict_samples(
