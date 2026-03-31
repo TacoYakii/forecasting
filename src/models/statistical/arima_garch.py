@@ -26,11 +26,13 @@ from typing import Optional, Tuple, Union, Iterable
 import numpy as np
 import pandas as pd
 
+from src.core.registry import MODEL_REGISTRY
 from src.models.statistical._garch_base import GarchBase
 from src.models.statistical._primitives import ARMA, GARCH
 from src.models.statistical.config import ArimaGarchConfig
 
 
+@MODEL_REGISTRY.register_model(name="arima_garch")
 class ArimaGarchForecaster(GarchBase):
     """
     ARIMA(p,d,q)-GARCH(gp,gq) probabilistic forecaster.
@@ -46,7 +48,7 @@ class ArimaGarchForecaster(GarchBase):
     Example:
         >>> config = ArimaGarchConfig(arima_order=(2, 1, 1), garch_order=(1, 1))
         >>> model = ArimaGarchForecaster(dataset=train_df, y_col="power",
-        ...                    x_cols=["wind_speed"], config=config)
+        ...                    exog_cols=["wind_speed"], config=config)
         >>> model.fit()
         >>> mu, sigma = model.forecast(horizon=24)
         >>> mu.shape   # (24,)
@@ -56,7 +58,7 @@ class ArimaGarchForecaster(GarchBase):
         self,
         dataset: pd.DataFrame,
         y_col: Union[str, int],
-        x_cols: Optional[Union[str, int, Iterable]] = None,
+        exog_cols: Optional[Union[str, int, Iterable]] = None,
         config: Optional[ArimaGarchConfig] = None,
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
@@ -71,7 +73,7 @@ class ArimaGarchForecaster(GarchBase):
         super().__init__(
             dataset=dataset,
             y_col=y_col,
-            x_cols=x_cols,
+            exog_cols=exog_cols,
             config=self.config,
             enable_logging=enable_logging,
             save_dir=save_dir,

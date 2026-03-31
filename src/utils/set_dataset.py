@@ -35,7 +35,7 @@ def _sort_dataset_by_index(dataset: pd.DataFrame) -> pd.DataFrame:
 def prepare_dataset(
     dataset: pd.DataFrame, 
     y_col: Union[str, int],
-    x_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
+    exog_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
     training_period: Optional[Tuple[Union[str, pd.Timestamp, int], Union[str, pd.Timestamp, int]]] = None, 
     forecast_period: Optional[Tuple[Union[str, pd.Timestamp, int], Union[str, pd.Timestamp, int]]] = None, 
     ) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.Index]:
@@ -65,16 +65,16 @@ def prepare_dataset(
         # Edge case: if there's only one row or empty, create empty DataFrame with same structure
         forecast_data = pd.DataFrame(columns=dataset.columns, index=pd.Index([], dtype=dataset.index.dtype))
     
-    # Handle x_cols            
-    if x_cols is None:
+    # Handle exog_cols            
+    if exog_cols is None:
         # Use all columns except y_col
         x_columns = [col for col in train_data.columns if col != y_col]
     else:
         # Convert single value to list, keep iterables as-is
-        if isinstance(x_cols, (str, int)):
-            x_columns = [x_cols]
+        if isinstance(exog_cols, (str, int)):
+            x_columns = [exog_cols]
         else:
-            x_columns = list(x_cols)
+            x_columns = list(exog_cols)
     
     # Extract features and target
     train_X = train_data[x_columns]

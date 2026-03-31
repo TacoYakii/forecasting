@@ -15,7 +15,7 @@ import pytest
 
 from src.core.forecast_results import ParametricForecastResult, QuantileForecastResult
 
-from .conftest import Y_COL, X_COLS, TRAIN_END, FORECAST_START
+from .conftest import Y_COL, EXOG_COLS, TRAIN_END, FORECAST_START
 
 PREDICTION_LENGTH = 6
 
@@ -32,7 +32,7 @@ _FAST_HP = {
 def future_exog(synthetic_df):
     """Future exogenous features for the forecast horizon."""
     future_df = synthetic_df.loc[FORECAST_START:]
-    future_X = future_df[X_COLS].to_numpy()[:PREDICTION_LENGTH]
+    future_X = future_df[EXOG_COLS].to_numpy()[:PREDICTION_LENGTH]
     future_index = future_df.index[:PREDICTION_LENGTH]
     return future_X, future_index
 
@@ -51,7 +51,7 @@ class TestDeepARForecaster:
 
         hp = {**_FAST_HP, "loss_type": "distribution", "distribution": "Normal"}
         model = DeepARForecaster(
-            dataset=train_df, y_col=Y_COL, x_cols=X_COLS,
+            dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS,
             hyperparameter=hp,
             enable_logging=False, save_dir=str(tmp_path),
         )
@@ -70,7 +70,7 @@ class TestDeepARForecaster:
 
         hp = {**_FAST_HP, "loss_type": "quantile"}
         model = DeepARForecaster(
-            dataset=train_df, y_col=Y_COL, x_cols=X_COLS,
+            dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS,
             hyperparameter=hp,
             enable_logging=False, save_dir=str(tmp_path),
         )
@@ -91,7 +91,7 @@ class TestDeepARForecaster:
 
         hp = {**_FAST_HP, "loss_type": "quantile"}
         model = DeepARForecaster(
-            dataset=train_df, y_col=Y_COL, x_cols=X_COLS,
+            dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS,
             hyperparameter=hp,
             enable_logging=False, save_dir=str(tmp_path),
         )
@@ -117,7 +117,7 @@ class TestTFTForecaster:
         from src.models.deep_time_series.tft import TFTForecaster
 
         model = TFTForecaster(
-            dataset=train_df, y_col=Y_COL, x_cols=X_COLS,
+            dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS,
             hyperparameter=_FAST_HP,
             enable_logging=False, save_dir=str(tmp_path),
         )
@@ -136,7 +136,7 @@ class TestTFTForecaster:
 
         hp = {**_FAST_HP, "loss_type": "distribution", "distribution": "Normal"}
         model = TFTForecaster(
-            dataset=train_df, y_col=Y_COL, x_cols=X_COLS,
+            dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS,
             hyperparameter=hp,
             enable_logging=False, save_dir=str(tmp_path),
         )
@@ -153,7 +153,7 @@ class TestTFTForecaster:
         from src.models.deep_time_series.tft import TFTForecaster
 
         model = TFTForecaster(
-            dataset=train_df, y_col=Y_COL, x_cols=X_COLS,
+            dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS,
             hyperparameter=_FAST_HP,
             enable_logging=False, save_dir=str(tmp_path),
         )

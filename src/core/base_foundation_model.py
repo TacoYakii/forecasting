@@ -106,7 +106,7 @@ class BaseFoundationModel(BaseForecaster):
         self,
         dataset: pd.DataFrame,
         y_col: Union[str, int],
-        x_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
+        exog_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
         hyperparameter: Optional[Dict] = None,
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
@@ -146,7 +146,7 @@ class BaseFoundationModel(BaseForecaster):
         super().__init__(
             dataset=dataset,
             y_col=y_col,
-            x_cols=x_cols,
+            exog_cols=exog_cols,
             hyperparameter=hyperparameter,
             enable_logging=enable_logging,
             save_dir=save_dir,
@@ -204,7 +204,6 @@ class BaseFoundationModel(BaseForecaster):
                 self.logger.info("Fine-tuning complete.")
 
         self.is_fitted_ = True
-        self._save_info()
 
         if self.enable_logging:
             self.logger.info(f"{self.nm} ready for prediction.")
@@ -237,7 +236,7 @@ class BaseFoundationModel(BaseForecaster):
 
         # Build context features if available
         context_X = None
-        if self.x_cols is not None and len(self.x_cols) > 0:
+        if self.exog_cols is not None and len(self.exog_cols) > 0:
             context_X = self.X.copy()
             if len(context_X) > self._context_length:
                 context_X = context_X[-self._context_length:]

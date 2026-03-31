@@ -26,11 +26,13 @@ from typing import Optional, Tuple, Union, Iterable
 import numpy as np
 import pandas as pd
 
+from src.core.registry import MODEL_REGISTRY
 from src.models.statistical._garch_base import GarchBase
 from src.models.statistical._primitives import SARIMA, GARCH
 from src.models.statistical.config import SarimaGarchConfig
 
 
+@MODEL_REGISTRY.register_model(name="sarima_garch")
 class SarimaGarchForecaster(GarchBase):
     """
     SARIMA(p,d,q)(P,D,Q,s)-GARCH(gp,gq) probabilistic forecaster.
@@ -58,7 +60,7 @@ class SarimaGarchForecaster(GarchBase):
         self,
         dataset: pd.DataFrame,
         y_col: Union[str, int],
-        x_cols: Optional[Union[str, int, Iterable]] = None,
+        exog_cols: Optional[Union[str, int, Iterable]] = None,
         config: Optional[SarimaGarchConfig] = None,
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
@@ -76,7 +78,7 @@ class SarimaGarchForecaster(GarchBase):
         super().__init__(
             dataset=dataset,
             y_col=y_col,
-            x_cols=x_cols,
+            exog_cols=exog_cols,
             config=self.config,
             enable_logging=enable_logging,
             save_dir=save_dir,

@@ -18,8 +18,10 @@ import torch
 from typing import Optional
 
 from src.core.base_foundation_model import BaseFoundationModel
+from src.core.registry import MODEL_REGISTRY
 
 
+@MODEL_REGISTRY.register_model(name="chronos")
 class ChronosForecaster(BaseFoundationModel):
     """
     Chronos probabilistic forecaster.
@@ -27,7 +29,7 @@ class ChronosForecaster(BaseFoundationModel):
     Wraps Amazon Chronos pretrained models with the BaseFoundationModel
     interface. Produces SampleForecastResult or QuantileForecastResult.
 
-    Chronos models do not support exogenous variables — x_cols are ignored.
+    Chronos models do not support exogenous variables — exog_cols are ignored.
 
     Model-specific hyperparameters (passed via hyperparameter dict):
         model_name_or_path (str): HuggingFace model ID. REQUIRED.

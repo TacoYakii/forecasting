@@ -154,12 +154,12 @@ class TestMoiraiForecaster:
         assert np.all(np.isfinite(result.samples))
 
     def test_with_exogenous(self, train_df, tmp_path):
-        """Moirai with x_cols (past covariates) produces valid result."""
+        """Moirai with exog_cols (past covariates) produces valid result."""
         from src.models.foundation.moirai import MoiraiForecaster
 
         model = MoiraiForecaster(
             dataset=train_df, y_col=Y_COL,
-            x_cols=["wind_speed"],
+            exog_cols=["wind_speed"],
             hyperparameter={
                 "model_name_or_path": "Salesforce/moirai-1.0-R-small",
                 "prediction_length": PREDICTION_LENGTH,

@@ -32,3 +32,5 @@ lightning_logs/
 *.pkl
 *.log
 *.csv
+
+/etc/*.ipynb

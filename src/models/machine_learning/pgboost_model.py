@@ -10,7 +10,7 @@ from typing import Union, Optional, Iterable, Dict
 from src.core.base_model import BaseForecaster
 from src.core.moment_matching import mu_std_to_dist_params
 from src.core.forecast_results import ParametricForecastResult
-from src.models.machine_learning.registry import MODEL_REGISTRY
+from src.core.registry import MODEL_REGISTRY
 
 def mseloss_objective(yhat, y, sample_weight=None):
     gradient = (yhat - y)
@@ -127,7 +127,7 @@ class PGBMForecaster(BaseForecaster):
         self,
         dataset: pd.DataFrame,
         y_col: Union[str, int],
-        x_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
+        exog_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
         hyperparameter: Optional[Dict] = None,
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
@@ -137,7 +137,7 @@ class PGBMForecaster(BaseForecaster):
         super().__init__(
             dataset,
             y_col,
-            x_cols,
+            exog_cols,
             hyperparameter,
             enable_logging,
             save_dir,
@@ -175,8 +175,7 @@ class PGBMForecaster(BaseForecaster):
             self._forecast_dist_name = best_dist
             self.hyperparameter["Dist"] = best_dist
         
-        self.is_fitted_ = True 
-        self._save_info()
+        self.is_fitted_ = True
         
         return self
     

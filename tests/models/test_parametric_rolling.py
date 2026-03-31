@@ -18,7 +18,7 @@ import pytest
 from src.core.forecast_results import ParametricForecastResult, SampleForecastResult
 from src.core.forecast_distribution import ParametricDistribution
 
-from .conftest import Y_COL, X_COLS, TRAIN_END, FORECAST_START, FORECAST_END
+from .conftest import Y_COL, EXOG_COLS, TRAIN_END, FORECAST_START, FORECAST_END
 
 HORIZON = 6
 
@@ -55,7 +55,7 @@ def _make_config(model_key: str):
     raise ValueError(f"Unknown model key: {model_key}")
 
 
-def _make_model(model_key: str, train_df, tmp_path, x_cols=None):
+def _make_model(model_key: str, train_df, tmp_path, exog_cols=None):
     """Instantiate a GARCH-family model."""
     config = _make_config(model_key)
 
@@ -74,7 +74,7 @@ def _make_model(model_key: str, train_df, tmp_path, x_cols=None):
     return cls(
         dataset=train_df,
         y_col=Y_COL,
-        x_cols=x_cols,
+        exog_cols=exog_cols,
         config=config,
         enable_logging=False,
         save_dir=str(tmp_path),

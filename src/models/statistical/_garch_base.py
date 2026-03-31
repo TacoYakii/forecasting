@@ -128,7 +128,7 @@ class GarchBase(BaseForecaster):
         self,
         dataset: pd.DataFrame,
         y_col: Union[str, int],
-        x_cols: Optional[Union[str, int, Iterable]] = None,
+        exog_cols: Optional[Union[str, int, Iterable]] = None,
         config=None,
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
@@ -145,7 +145,7 @@ class GarchBase(BaseForecaster):
         super().__init__(
             dataset=dataset,
             y_col=y_col,
-            x_cols=x_cols,
+            exog_cols=exog_cols,
             hyperparameter=hyperparameter,
             enable_logging=enable_logging,
             save_dir=save_dir,
@@ -555,7 +555,6 @@ class GarchBase(BaseForecaster):
         self._sigma2 = self._garch.compute_variance_series(self._residuals)
 
         self.is_fitted_ = True
-        self._save_info()
         return self
 
     # ------------------------------------------------------------------

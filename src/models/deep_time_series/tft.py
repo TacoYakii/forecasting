@@ -15,7 +15,7 @@ Reference:
 
 from neuralforecast.models import TFT
 from src.core.base_deep_model import BaseDeepModel
-from src.models.machine_learning.registry import MODEL_REGISTRY
+from src.core.registry import MODEL_REGISTRY
 
 
 @MODEL_REGISTRY.register_model(name="tft")
@@ -55,9 +55,9 @@ class TFTForecaster(BaseDeepModel):
     def _create_model(self) -> TFT:
         hp = dict(self._model_hp)
 
-        # Build exogenous feature lists
-        feat_cols = self._get_feature_cols(self.dataset)
-        futr_exog = feat_cols if feat_cols else None
+        # Build exogenous feature lists (futr/hist split)
+        futr_exog = self.futr_cols or None
+        hist_exog = self.hist_cols or None
 
         loss, valid_loss = self._create_loss(
             default_loss_type="quantile",
@@ -75,6 +75,7 @@ class TFTForecaster(BaseDeepModel):
             early_stop_patience_steps=self._early_stop,
             scaler_type=self._scaler_type,
             futr_exog_list=futr_exog,
+            hist_exog_list=hist_exog,
             # Model architecture params
             hidden_size=hp.pop("hidden_size", 128),
             n_head=hp.pop("n_head", 4),

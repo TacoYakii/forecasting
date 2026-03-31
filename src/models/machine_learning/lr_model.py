@@ -8,7 +8,7 @@ import joblib
 from typing import Union, Optional, Iterable, Dict
 
 from src.core.base_model import DeterministicForecaster
-from src.models.machine_learning.registry import MODEL_REGISTRY
+from src.core.registry import MODEL_REGISTRY
 
 class LRModel: 
     def __init__(
@@ -55,7 +55,7 @@ class LRForecaster(DeterministicForecaster):
         self,
         dataset: pd.DataFrame,
         y_col: Union[str, int],
-        x_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
+        exog_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
         hyperparameter: Optional[Dict] = None,
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
@@ -65,7 +65,7 @@ class LRForecaster(DeterministicForecaster):
         super().__init__(
             dataset,
             y_col,
-            x_cols,
+            exog_cols,
             hyperparameter,
             enable_logging,
             save_dir,
@@ -79,8 +79,7 @@ class LRForecaster(DeterministicForecaster):
             train_X=self.X,
             train_y=self.y
         )
-        self.is_fitted_ = True 
-        self._save_info()
+        self.is_fitted_ = True
         
         return self 
     

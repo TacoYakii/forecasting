@@ -99,6 +99,30 @@ Download (KMA, ECMWF) -> NWP preprocessing (GRIB2/TXT readers, validators, deriv
 - **CRPS**: Probabilistic calibration metrics
 - **Loss Registry**: Pluggable loss functions (RandomCRPSLoss, QuantileCRPSLoss, PinballLoss)
 
+### Exogenous Variable Classification
+
+Exogenous variables are classified by **availability at prediction time**:
+
+| 분류 | 정의 | 예시 | 사용 모형 |
+|------|------|------|-----------|
+| **`futr_exog`** | 미래 값이 알려진 변수 | NWP 예보 (풍속, 온도) | Statistical, Deep |
+| **`hist_exog`** | 과거 값만 관측 가능 | 실측 풍속 (SCADA) | Deep only |
+
+Model family별 exog 인터페이스:
+
+| Family | Parameter | Reason |
+|--------|-----------|--------|
+| Statistical (GARCH) | `exog_cols` | futr만 학습/예측에 사용 (hist 사용 시 leakage) |
+| ML (CatBoost 등) | `exog_cols` | per-horizon CSV에서 feature engineering 완료 |
+| Deep (DeepAR, TFT) | `futr_cols` + `hist_cols` | NeuralForecast `futr_exog_list`/`hist_exog_list` 분리 필요 |
+| Foundation (Moirai) | `exog_cols` | `past_feat_dynamic_real`로 context만 사용 |
+| Foundation (Chronos) | — | exog 미지원 |
+
+Runner가 예측 시 미래 구간에는 **futr_exog만** 전달 (hist leakage 방지).
+Deep 모형의 인코더는 과거 구간에서 futr+hist 모두 활용하여 hidden state로 압축.
+
+> Design details: `docs/exogenous_variable_design.md`
+
 ## Key Patterns
 
 - **ForecastResult -> Distribution**: All Result objects can be converted to a Distribution object for a specific horizon via `to_distribution(h)` (ParametricDistribution or EmpiricalDistribution)
@@ -111,3 +135,4 @@ Download (KMA, ECMWF) -> NWP preprocessing (GRIB2/TXT readers, validators, deriv
 - Every model's `forecast()` returns a ForecastResult object (`ParametricForecastResult`, `QuantileForecastResult`, `SampleForecastResult`) — never raw mu/std
 - `etc/` contains config files and auxiliary scripts; `res/` stores experiment results (both gitignored)
 - Notebooks in `notebooks/` are for exploration and testing, not production code
+- When adding tests, update the corresponding `TEST_*.md` file in the test directory to document what each test verifies (e.g., `docs/TEST_EXOG_SPLIT.md`)

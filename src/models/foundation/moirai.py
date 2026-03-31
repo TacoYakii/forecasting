@@ -19,8 +19,10 @@ import torch
 from typing import Optional, List
 
 from src.core.base_foundation_model import BaseFoundationModel
+from src.core.registry import MODEL_REGISTRY
 
 
+@MODEL_REGISTRY.register_model(name="moirai")
 class MoiraiForecaster(BaseFoundationModel):
     """
     Moirai probabilistic forecaster.
@@ -28,7 +30,7 @@ class MoiraiForecaster(BaseFoundationModel):
     Wraps Salesforce Moirai pretrained models with the BaseFoundationModel
     interface. Produces SampleForecastResult or QuantileForecastResult.
 
-    Unlike Chronos, Moirai supports exogenous variables via x_cols, which
+    Unlike Chronos, Moirai supports exogenous variables via exog_cols, which
     are passed as ``past_feat_dynamic_real`` to the model.
 
     Model-specific hyperparameters (passed via hyperparameter dict):
@@ -50,7 +52,7 @@ class MoiraiForecaster(BaseFoundationModel):
     Example:
         >>> model = MoiraiForecaster(
         ...     dataset=df, y_col="power",
-        ...     x_cols=["wind_speed", "temperature"],
+        ...     exog_cols=["wind_speed", "temperature"],
         ...     hyperparameter={
         ...         "model_name_or_path": "Salesforce/moirai-1.0-R-small",
         ...         "prediction_length": 48,
@@ -64,11 +66,11 @@ class MoiraiForecaster(BaseFoundationModel):
 
     def _get_feat_cols(self) -> List[str]:
         """Get exogenous feature column names as a list."""
-        if self.x_cols is None:
+        if self.exog_cols is None:
             return []
-        if isinstance(self.x_cols, (str, int)):
-            return [self.x_cols]
-        return list(self.x_cols)
+        if isinstance(self.exog_cols, (str, int)):
+            return [self.exog_cols]
+        return list(self.exog_cols)
 
     def _load_pretrained(self) -> None:
         """Load Moirai model from HuggingFace Hub."""

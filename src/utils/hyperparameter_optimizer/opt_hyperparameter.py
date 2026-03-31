@@ -32,7 +32,7 @@ class ModelOptimizer:
         model: type,
         dataset: pd.DataFrame, 
         y_col: Union[str, int],
-        x_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
+        exog_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
         training_end_idx: Optional[Union[str, pd.Timestamp, int]] = None, 
         validation_end_idx: Optional[Union[str, pd.Timestamp, int]] = None, 
         save_dir: Optional[Union[str, Path]] = None,
@@ -45,7 +45,7 @@ class ModelOptimizer:
         self.train_x, self.train_y, self.valid_X, self.valid_y, _ = prepare_dataset(
             dataset, 
             y_col, 
-            x_cols, 
+            exog_cols, 
             training_end_idx, 
             validation_end_idx
             )

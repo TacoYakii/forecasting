@@ -112,12 +112,17 @@ class BaseDeepModel(BaseForecaster):
         self,
         dataset: pd.DataFrame,
         y_col: Union[str, int],
-        x_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
+        futr_cols: Optional[List[str]] = None,
+        hist_cols: Optional[List[str]] = None,
         hyperparameter: Optional[Dict] = None,
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
         verbose: bool = False,
     ):
+        # Store futr/hist split for NeuralForecast
+        self.futr_cols: List[str] = list(futr_cols) if futr_cols else []
+        self.hist_cols: List[str] = list(hist_cols) if hist_cols else []
+
         # Merge user hyperparameters with defaults
         self._deep_hp = dict(_DEFAULT_DEEP_HP)
         if hyperparameter:
@@ -147,11 +152,11 @@ class BaseDeepModel(BaseForecaster):
         self._nf: Optional[NeuralForecast] = None  # NeuralForecast wrapper
         self._freq: Optional[str] = None            # inferred from dataset index
 
-        # Call parent — triggers prepare_dataset()
+        # Call parent with combined exog_cols
         super().__init__(
             dataset=dataset,
             y_col=y_col,
-            x_cols=x_cols,
+            exog_cols=self.futr_cols + self.hist_cols or None,
             hyperparameter=hyperparameter,  # store original for info.json
             enable_logging=enable_logging,
             save_dir=save_dir,
@@ -251,12 +256,8 @@ class BaseDeepModel(BaseForecaster):
         return nf_df
 
     def _get_feature_cols(self, df: pd.DataFrame) -> List[str]:
-        """Get list of exogenous feature column names."""
-        if self.x_cols is None:
-            return []
-        if isinstance(self.x_cols, (str, int)):
-            return [self.x_cols]
-        return list(self.x_cols)
+        """Get all exogenous feature column names (futr + hist)."""
+        return self.futr_cols + self.hist_cols
 
     # ------------------------------------------------------------------
     # Fit
@@ -292,7 +293,6 @@ class BaseDeepModel(BaseForecaster):
         )
 
         self.is_fitted_ = True
-        self._save_info()
 
         if self.enable_logging:
             self.logger.info("Training complete.")
@@ -316,7 +316,7 @@ class BaseDeepModel(BaseForecaster):
         Args:
             future_X: Exogenous features for the forecast horizon,
                 shape (prediction_length, n_features). Required if model
-                was trained with exogenous features (x_cols).
+                was trained with exogenous features (exog_cols).
             future_index: Time index for the forecast horizon,
                 shape (prediction_length,). Required together with future_X.
 
@@ -327,10 +327,9 @@ class BaseDeepModel(BaseForecaster):
             raise RuntimeError("Model not trained. Call fit() first.")
 
         futr_df = None
-        feat_cols = self._get_feature_cols(self.dataset)
-        if future_X is not None and future_index is not None and feat_cols:
+        if future_X is not None and future_index is not None and self.futr_cols:
             futr_dict = {"unique_id": _SERIES_ID, "ds": future_index}
-            for i, col in enumerate(feat_cols):
+            for i, col in enumerate(self.futr_cols):
                 futr_dict[col] = future_X[:, i]
             futr_df = pd.DataFrame(futr_dict).reset_index(drop=True)
 
@@ -368,7 +367,8 @@ class BaseDeepModel(BaseForecaster):
             raise RuntimeError("Model not trained. Call fit() first.")
 
         # Build NeuralForecast context DataFrame
-        feat_cols = self._get_feature_cols(self.dataset)
+        # context_X contains futr_cols + hist_cols (in that order)
+        all_context_cols = self.futr_cols + self.hist_cols
 
         context_df = pd.DataFrame({
             "unique_id": _SERIES_ID,
@@ -376,15 +376,15 @@ class BaseDeepModel(BaseForecaster):
             "y": context_y,
         })
         if context_X is not None:
-            for i, col in enumerate(feat_cols):
+            for i, col in enumerate(all_context_cols):
                 context_df[col] = context_X[:, i]
         context_df = context_df.reset_index(drop=True)
 
-        # Build future exog DataFrame
+        # Build future exog DataFrame (futr_cols only — no hist leakage)
         futr_df = None
-        if future_X is not None and future_index is not None and feat_cols:
+        if future_X is not None and future_index is not None and self.futr_cols:
             futr_dict = {"unique_id": _SERIES_ID, "ds": future_index}
-            for i, col in enumerate(feat_cols):
+            for i, col in enumerate(self.futr_cols):
                 futr_dict[col] = future_X[:, i]
             futr_df = pd.DataFrame(futr_dict).reset_index(drop=True)
 

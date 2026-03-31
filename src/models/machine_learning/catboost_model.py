@@ -6,7 +6,7 @@ from typing import Union, Optional, Iterable, Dict
 
 from src.core.base_model import BaseForecaster
 from src.core.forecast_results import ParametricForecastResult
-from src.models.machine_learning.registry import MODEL_REGISTRY
+from src.core.registry import MODEL_REGISTRY
 
 class CatBoostModel: 
     def __init__(
@@ -79,7 +79,7 @@ class CatBoostForecaster(BaseForecaster):
         self,
         dataset: pd.DataFrame,
         y_col: Union[str, int],
-        x_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
+        exog_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
         hyperparameter: Optional[Dict] = None,
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
@@ -89,7 +89,7 @@ class CatBoostForecaster(BaseForecaster):
         super().__init__(
             dataset,
             y_col,
-            x_cols,
+            exog_cols,
             hyperparameter,
             enable_logging,
             save_dir,
@@ -103,8 +103,7 @@ class CatBoostForecaster(BaseForecaster):
             train_X=self.X,
             train_y=self.y,
         ) 
-        self.is_fitted_ = True 
-        self._save_info()
+        self.is_fitted_ = True
         
         return self
     

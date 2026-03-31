@@ -8,7 +8,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 Y_COL = "power"
-X_COLS = ["wind_speed", "temperature"]
+EXOG_COLS = ["wind_speed", "temperature"]
 
 # Time splits (within the 720-hour synthetic data: 2023-01-01 ~ 2023-01-30)
 TRAIN_END = "2023-01-20"

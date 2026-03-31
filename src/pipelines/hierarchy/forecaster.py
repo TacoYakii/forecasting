@@ -23,7 +23,7 @@ from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
 
 from src.core.forecast_distribution import ParametricDistribution
-from src.models.machine_learning.registry import MODEL_REGISTRY
+from src.core.registry import MODEL_REGISTRY
 from src.pipelines.config import HierarchyForecastConfig
 
 class BaseForecastRunner:
@@ -129,7 +129,7 @@ class BaseForecastRunner:
         data = pd.read_csv(csv_file, index_col="basis_time")
 
         training_period, forecast_period = self.config.period_setting[period]
-        x_cols = self.config.exogeneous_columns
+        exog_cols = self.config.exogeneous_columns
 
         # Split data: pass only training data to the model
         train_data = data.loc[training_period[0]:training_period[1]]
@@ -140,13 +140,13 @@ class BaseForecastRunner:
         model = model_class(
             dataset=train_data,
             y_col=self.config.y_col,
-            x_cols=x_cols,
+            exog_cols=exog_cols,
             hyperparameter=self.config.model_configurations[model_name],
         )
 
         # Fit and predict
         model.fit()
-        forecast_X = forecast_data[model.x_cols].to_numpy()
+        forecast_X = forecast_data[model.exog_cols].to_numpy()
         forecast_dist = model.forecast(forecast_X, forecast_data.index)
         
         # Create output directory

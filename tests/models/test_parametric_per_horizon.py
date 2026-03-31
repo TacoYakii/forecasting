@@ -16,7 +16,7 @@ import pytest
 from src.core.forecast_results import ParametricForecastResult
 from src.core.forecast_distribution import ParametricDistribution
 
-from .conftest import Y_COL, X_COLS, TRAIN_END, FORECAST_START, FORECAST_END
+from .conftest import Y_COL, EXOG_COLS, TRAIN_END, FORECAST_START, FORECAST_END
 
 
 # ======================================================================
@@ -38,14 +38,14 @@ class TestDeterministicForecasters:
         model = model_cls(
             dataset=train_df,
             y_col=Y_COL,
-            x_cols=X_COLS,
+            exog_cols=EXOG_COLS,
             enable_logging=False,
             save_dir=str(tmp_path),
         )
         model.fit()
         assert model.is_fitted_
 
-        forecast_X = forecast_df[X_COLS].to_numpy()
+        forecast_X = forecast_df[EXOG_COLS].to_numpy()
         forecast_index = forecast_df.index
         result = model.forecast(forecast_X, forecast_index)
 
@@ -68,12 +68,12 @@ class TestDeterministicForecasters:
         from src.models.machine_learning.lr_model import LRForecaster
 
         model = LRForecaster(
-            dataset=train_df, y_col=Y_COL, x_cols=X_COLS,
+            dataset=train_df, y_col=Y_COL, exog_cols=EXOG_COLS,
             enable_logging=False, save_dir=str(tmp_path),
         )
         model.fit()
 
-        forecast_X = forecast_df[X_COLS].to_numpy()
+        forecast_X = forecast_df[EXOG_COLS].to_numpy()
         result = model.forecast(forecast_X, forecast_df.index)
 
         dist = result.to_distribution(h=1)
@@ -89,12 +89,12 @@ class TestDeterministicForecasters:
         from src.models.machine_learning.lr_model import LRForecaster
 
         model = LRForecaster(
-            dataset=train_df, y_col=Y_COL, x_cols=X_COLS,
+            dataset=train_df, y_col=Y_COL, exog_cols=EXOG_COLS,
             enable_logging=False, save_dir=str(tmp_path),
         )
         model.fit()
 
-        result = model.forecast(forecast_df[X_COLS].to_numpy(), forecast_df.index)
+        result = model.forecast(forecast_df[EXOG_COLS].to_numpy(), forecast_df.index)
         df_out = result.to_dataframe(h=1)
 
         assert "mu" in df_out.columns
@@ -117,14 +117,14 @@ class TestNativeProbabilisticForecasters:
         model = model_cls(
             dataset=train_df,
             y_col=Y_COL,
-            x_cols=X_COLS,
+            exog_cols=EXOG_COLS,
             enable_logging=False,
             save_dir=str(tmp_path),
         )
         model.fit()
         assert model.is_fitted_
 
-        forecast_X = forecast_df[X_COLS].to_numpy()
+        forecast_X = forecast_df[EXOG_COLS].to_numpy()
         result = model.forecast(forecast_X, forecast_df.index)
 
         assert isinstance(result, ParametricForecastResult)
@@ -149,7 +149,7 @@ class TestPerHorizonRunner:
             data_dir=per_horizon_csv_dir,
             model_name="lr",
             y_col=Y_COL,
-            x_cols=X_COLS,
+            exog_cols=EXOG_COLS,
             training_period=("2023-01-01", TRAIN_END),
             forecast_period=(FORECAST_START, FORECAST_END),
             enable_logging=False,
@@ -182,7 +182,7 @@ class TestPerHorizonRunner:
             data_dir=per_horizon_csv_dir,
             model_name="lr",
             y_col=Y_COL,
-            x_cols=X_COLS,
+            exog_cols=EXOG_COLS,
             training_period=("2023-01-01", TRAIN_END),
             forecast_period=(FORECAST_START, FORECAST_END),
             enable_logging=False,

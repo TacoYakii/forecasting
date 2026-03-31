@@ -1,14 +1,14 @@
 from pathlib import Path
+from typing import Dict, Iterable, Optional, Union
+
+import joblib
+import numpy as np
+import pandas as pd
 from sklearn.ensemble import GradientBoostingRegressor
 
-import pandas as pd 
-import numpy as np 
-import joblib
-
-from typing import Union, Optional, Iterable, Dict
-
 from src.core.base_model import DeterministicForecaster
-from src.models.machine_learning.registry import MODEL_REGISTRY
+from src.core.registry import MODEL_REGISTRY
+
 
 class GBModel: 
     def __init__(
@@ -37,8 +37,7 @@ class GBModel:
 
 @MODEL_REGISTRY.register_model(name="gbm")
 class GBForecaster(DeterministicForecaster):
-    """
-    Scikit-learn GradientBoosting-based deterministic forecaster with configurable distribution output.
+    """Scikit-learn GradientBoosting-based deterministic forecaster with configurable distribution output.
 
     Predicts the mean (mu) via GradientBoostingRegressor and estimates uncertainty
     from historical standard deviation of the target variable.
@@ -56,7 +55,7 @@ class GBForecaster(DeterministicForecaster):
         self,
         dataset: pd.DataFrame,
         y_col: Union[str, int],
-        x_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
+        exog_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
         hyperparameter: Optional[Dict] = None,
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
@@ -66,7 +65,7 @@ class GBForecaster(DeterministicForecaster):
         super().__init__(
             dataset,
             y_col,
-            x_cols,
+            exog_cols,
             hyperparameter,
             enable_logging,
             save_dir,
@@ -80,14 +79,12 @@ class GBForecaster(DeterministicForecaster):
             train_X=self.X,
             train_y=self.y
         )
-        self.is_fitted_ = True 
-        self._save_info()
+        self.is_fitted_ = True
         
         return self 
     
     def forecast(self, X: np.ndarray, target_index: pd.Index):
-        """
-        Generate probabilistic forecast.
+        """Generate probabilistic forecast.
 
         Args:
             X: Feature matrix of shape (T, n_features).
@@ -100,8 +97,7 @@ class GBForecaster(DeterministicForecaster):
         return self.build_forecast_result(mu, target_index)
     
     def _save_model_specific(self, model_path: Path) -> Path:
-        """
-        Save GradientBoostingRegressor model using joblib format.
+        """Save GradientBoostingRegressor model using joblib format.
         
         Uses joblib for efficient serialization of scikit-learn models,
         which is the recommended approach for sklearn model persistence.

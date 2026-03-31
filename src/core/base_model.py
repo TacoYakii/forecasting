@@ -1,28 +1,29 @@
-import numpy as np
-import sys, re
-import pandas as pd
 import logging
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Union, Optional, Tuple, Dict, Any, Iterable, List, Self
+import re
+import sys
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Iterable, Optional, Self, Tuple, Union
+
+import numpy as np
+import pandas as pd
 
 from .config import BaseConfig
 from .forecast_distribution import DISTRIBUTION_REGISTRY
-from .moment_matching import mu_std_to_dist_params
 from .forecast_results import ParametricForecastResult
-
+from .moment_matching import mu_std_to_dist_params
 
 # ---------------------------------------------------------------------------
 # Model metadata dataclass
 # ---------------------------------------------------------------------------
 
 @dataclass
-class ModelInfo(BaseConfig):
+class ModelConfig(BaseConfig):
     """Structured metadata for a fitted model.
 
-    Saved as ``info.yaml`` in the model's base directory.
+    Saved as ``model_config.yaml`` in the model's base directory.
 
     Attributes:
         model_name: Class name of the model.
@@ -31,8 +32,8 @@ class ModelInfo(BaseConfig):
         dataset_setting: Target / feature column info.
 
     Example:
-        >>> info = ModelInfo(model_name="XGBoostForecaster")
-        >>> info.save(Path("res/XGBoostForecaster/0/info.yaml"))
+        >>> info = ModelConfig(model_name="XGBoostForecaster")
+        >>> info.save(Path("res/XGBoostForecaster/0/model_config.yaml"))
     """
 
     model_name: str = ""
@@ -47,7 +48,7 @@ class BaseModel(ABC):
     Provides:
     - Automatic directory structure creation and management
     - Comprehensive logging system with file and console output
-    - Structured metadata (ModelInfo) with YAML persistence
+    - Structured metadata (ModelConfig) with YAML persistence
     - Model serialization and deserialization
     - Training state tracking and validation
     - Experiment organization with auto-incrementing directories
@@ -57,14 +58,14 @@ class BaseModel(ABC):
         └── ModelClassName/
             └── 0/  # Auto-incremented experiment number
                 ├── ModelClassName.log
-                ├── info.yaml
+                ├── model_config.yaml
                 └── ModelClassName_model.{pkl,cbm,pth,json}
 
     Attributes:
         nm (str): Name of the model class (read-only property).
         base_dir (Path): Base directory for this model instance.
         log_file (Path): Path to the log file.
-        model_info (ModelInfo): Structured model metadata.
+        model_config (ModelConfig): Structured model metadata.
         logger (logging.Logger): Logger instance for this model.
         enable_logging (bool): Whether logging is enabled.
 
@@ -78,7 +79,7 @@ class BaseModel(ABC):
     Example:
         >>> model = SomeForecaster(dataset=df, y_col='power')
         >>> model.fit()
-        >>> model.model_info.save(model.base_dir / "info.yaml")
+        >>> model.model_config.save(model.base_dir / "model_config.yaml")
     """
 
     def __init__(
@@ -91,12 +92,11 @@ class BaseModel(ABC):
         self._subclass_nm = self.__class__.__name__
         self.enable_logging = enable_logging
 
-        # Set up directories
+        # Set up directories (created lazily on save_model or enable_logging)
         if save_dir is None:
             self.base_dir, self.log_file = self._get_default_dirs_setting()
         else:
             self.base_dir = Path(save_dir)
-            self.base_dir.mkdir(parents=True, exist_ok=True)
             self.log_file = self.base_dir / f"{self._subclass_nm}.log"
 
         # Fitting indicator
@@ -109,7 +109,7 @@ class BaseModel(ABC):
             self.hyperparameter = hyperparameter
 
         # Structured metadata
-        self.model_info = ModelInfo(
+        self.model_config = ModelConfig(
             model_name=self._subclass_nm,
             created=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             hyperparameter=(
@@ -166,8 +166,6 @@ class BaseModel(ABC):
 
         log_file = exp_dir / f"{class_name}.log"
 
-        exp_dir.mkdir(parents=True, exist_ok=True)
-
         return exp_dir, log_file
 
     def _setup_logging(self, verbose: bool) -> None:
@@ -181,6 +179,7 @@ class BaseModel(ABC):
 
         self.logger.handlers.clear()
 
+        self.base_dir.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(str(self.log_file), mode="w")
         file_handler.setLevel(logging.INFO)
 
@@ -199,19 +198,17 @@ class BaseModel(ABC):
 
         self.logger.info(f"Initialized {self._subclass_nm} model")
 
-    def save_info(self) -> Path:
-        """Save model metadata to info.yaml.
+    def save_model_config(self) -> Path:
+        """Save model metadata to model_config.yaml.
 
         Returns:
-            Path to the saved info file.
+            Path to the saved config file.
         """
-        self.model_info.hyperparameter = self.hyperparameter
-        info_path = self.base_dir / "info.yaml"
-        self.model_info.save(info_path)
-        return info_path
+        self.model_config.hyperparameter = self.hyperparameter
+        config_path = self.base_dir / "model_config.yaml"
+        self.model_config.save(config_path)
+        return config_path
 
-    # Keep the old name as an alias during migration
-    _save_info = save_info
 
 
 class BaseForecaster(BaseModel):
@@ -225,7 +222,7 @@ class BaseForecaster(BaseModel):
     Attributes:
         dataset (pd.DataFrame): Training dataset (sorted by index).
         y_col (str | int):      Target column name or index.
-        x_cols (list):          Feature column names.
+        exog_cols (list):       Exogenous feature column names.
         y (np.ndarray):         Target values, shape (N,).
         X (np.ndarray):         Feature matrix, shape (N, n_features).
         index (pd.Index):       Time index of the dataset.
@@ -233,7 +230,7 @@ class BaseForecaster(BaseModel):
     Args:
         dataset:    Training DataFrame with a proper index.
         y_col:      Target column name (str) or positional index (int).
-        x_cols:     Feature columns. None → all columns except y_col.
+        exog_cols:  Exogenous feature columns. None → all columns except y_col.
         hyperparameter: Model-specific hyperparameters.
         enable_logging: Enable file/console logging.
         save_dir:   Custom directory for model artifacts.
@@ -248,7 +245,7 @@ class BaseForecaster(BaseModel):
         self,
         dataset: pd.DataFrame,
         y_col: Union[str, int],
-        x_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
+        exog_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
         hyperparameter: Optional[Dict] = None,
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
@@ -263,12 +260,12 @@ class BaseForecaster(BaseModel):
 
         self.dataset = dataset
         self.y_col = y_col
-        self.x_cols = x_cols
+        self.exog_cols = exog_cols
 
-        # Store dataset setting in model_info
-        self.model_info.dataset_setting = {
+        # Store dataset setting in model_config
+        self.model_config.dataset_setting = {
             "y_col": y_col,
-            "x_cols": x_cols,
+            "exog_cols": exog_cols,
         }
 
         # Extract y, X, index from the dataset
@@ -280,24 +277,24 @@ class BaseForecaster(BaseModel):
         After this call the following attributes are set:
             self.y      — np.ndarray, shape (N,)
             self.X      — np.ndarray, shape (N, n_features)
-            self.x_cols — list[str]
+            self.exog_cols — list[str]
             self.index  — pd.Index
         """
         self.dataset = self._sort_dataset_by_index(self.dataset)
 
         # Resolve column names
         self.y_col = self._resolve_column(self.y_col)
-        if self.x_cols is not None:
-            if isinstance(self.x_cols, (str, int)):
-                self.x_cols = [self._resolve_column(self.x_cols)]
+        if self.exog_cols is not None:
+            if isinstance(self.exog_cols, (str, int)):
+                self.exog_cols = [self._resolve_column(self.exog_cols)]
             else:
-                self.x_cols = [self._resolve_column(c) for c in self.x_cols]
+                self.exog_cols = [self._resolve_column(c) for c in self.exog_cols]
         else:
-            self.x_cols = [c for c in self.dataset.columns if c != self.y_col]
+            self.exog_cols = [c for c in self.dataset.columns if c != self.y_col]
 
         # Extract arrays
         self.y = self.dataset[self.y_col].to_numpy()
-        self.X = self.dataset[self.x_cols].to_numpy()
+        self.X = self.dataset[self.exog_cols].to_numpy()
         self.index = self.dataset.index
 
     def _sort_dataset_by_index(self, dataset: pd.DataFrame) -> pd.DataFrame:
@@ -362,7 +359,7 @@ class BaseForecaster(BaseModel):
     def save_model(self, model_path: Optional[Union[str, Path]] = None) -> Path:
         """Save the model and its metadata.
 
-        Saves both common metadata (ModelInfo as YAML) and the model-specific
+        Saves both common metadata (ModelConfig as YAML) and the model-specific
         data using the format appropriate for each model type.
 
         Args:
@@ -376,6 +373,8 @@ class BaseForecaster(BaseModel):
             >>> model.save_model()  # Uses default path
             >>> model.save_model("custom_model")  # Custom path
         """
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+
         if model_path is None:
             model_path = self.base_dir / f"{self._subclass_nm}_model"
         else:
@@ -383,6 +382,7 @@ class BaseForecaster(BaseModel):
 
         model_path = model_path.with_suffix("")
 
+        self.save_model_config()
         model_file_path = self._save_model_specific(model_path)
 
         if self.enable_logging:
@@ -465,7 +465,7 @@ class DeterministicForecaster(BaseForecaster):
         self,
         dataset: pd.DataFrame,
         y_col: Union[str, int],
-        x_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
+        exog_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
         hyperparameter: Optional[Dict] = None,
         enable_logging: bool = True,
         save_dir: Optional[str] = None,
@@ -490,7 +490,7 @@ class DeterministicForecaster(BaseForecaster):
         super().__init__(
             dataset=dataset,
             y_col=y_col,
-            x_cols=x_cols,
+            exog_cols=exog_cols,
             hyperparameter=hp if hp else None,
             enable_logging=enable_logging,
             save_dir=save_dir,
@@ -548,8 +548,6 @@ class DeterministicForecaster(BaseForecaster):
         Returns:
             ParametricForecastResult with shape (T, 1).
         """
-        from .forecast_results import ParametricForecastResult
-
         std = self.get_historical_std(target_index)
         params = mu_std_to_dist_params(
             self.distribution, mu, std, **self.dist_extra_params

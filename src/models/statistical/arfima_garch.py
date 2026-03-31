@@ -31,6 +31,7 @@ from typing import Optional, Tuple, Union, Iterable
 import numpy as np
 import pandas as pd
 
+from src.core.registry import MODEL_REGISTRY
 from src.models.statistical._garch_base import GarchBase
 from src.models.statistical._primitives import (
     ARMA, GARCH,
@@ -39,6 +40,7 @@ from src.models.statistical._primitives import (
 from src.models.statistical.config import ArfimaGarchConfig
 
 
+@MODEL_REGISTRY.register_model(name="arfima_garch")
 class ArfimaGarchForecaster(GarchBase):
     """
     ARFIMA(p,d,q)-GARCH(gp,gq) probabilistic forecaster with long memory.
@@ -68,7 +70,7 @@ class ArfimaGarchForecaster(GarchBase):
         self,
         dataset: pd.DataFrame,
         y_col: Union[str, int],
-        x_cols: Optional[Union[str, int, Iterable]] = None,
+        exog_cols: Optional[Union[str, int, Iterable]] = None,
         config: Optional[ArfimaGarchConfig] = None,
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
@@ -92,7 +94,7 @@ class ArfimaGarchForecaster(GarchBase):
         super().__init__(
             dataset=dataset,
             y_col=y_col,
-            x_cols=x_cols,
+            exog_cols=exog_cols,
             config=self.config,
             enable_logging=enable_logging,
             save_dir=save_dir,

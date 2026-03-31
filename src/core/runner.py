@@ -110,7 +110,9 @@ class RollingRunner:
         dataset:         Full DataFrame (train + test), sorted by time index.
         y_col:           Target column name.
         forecast_period: (start, end) tuple defining the evaluation period.
-        x_cols:          Feature column names. None → no exogenous features.
+        exog_cols:       Exogenous column names for Statistical/Foundation models.
+        futr_cols:       Future-known exogenous columns for Deep models (NWP etc.).
+        hist_cols:       Historical-only exogenous columns for Deep models (SCADA obs etc.).
 
     Example:
         >>> model = ArimaGarchForecaster(dataset=train_df, ...).fit()
@@ -127,7 +129,9 @@ class RollingRunner:
         dataset: pd.DataFrame,
         y_col: str,
         forecast_period: Tuple,
-        x_cols: Optional[List[str]] = None,
+        exog_cols: Optional[List[str]] = None,
+        futr_cols: Optional[List[str]] = None,
+        hist_cols: Optional[List[str]] = None,
     ):
         if not model.is_fitted_:
             raise RuntimeError("Model must be fitted before rolling forecast.")
@@ -135,7 +139,9 @@ class RollingRunner:
         self._model = model
         self._dataset = dataset.sort_index()
         self._y_col = y_col
-        self._x_cols = x_cols or []
+        self._exog_cols = exog_cols or []
+        self._futr_cols = futr_cols or []
+        self._hist_cols = hist_cols or []
         self._forecast_period = forecast_period
 
         self._forecast_data = self._dataset.loc[
@@ -207,8 +213,8 @@ class RollingRunner:
         n_steps = len(forecast_times)
 
         x_aligned = (
-            self._forecast_data[self._x_cols].to_numpy()
-            if self._x_cols
+            self._forecast_data[self._exog_cols].to_numpy()
+            if self._exog_cols
             else np.empty((n_steps, 0))
         )
         n_exog = x_aligned.shape[1] if x_aligned.ndim == 2 else 0
@@ -249,7 +255,13 @@ class RollingRunner:
         kwargs = dict(method_kwargs) if method_kwargs else {}
         forecast_times = self._forecast_data.index
         n_steps = len(forecast_times)
-        has_exog = len(self._x_cols) > 0
+
+        # Determine exog column sets:
+        # - Deep models use futr_cols/hist_cols (split)
+        # - Foundation/other models use exog_cols (unified)
+        has_futr = len(self._futr_cols) > 0
+        has_hist = len(self._hist_cols) > 0
+        has_exog = len(self._exog_cols) > 0
 
         idx = self._dataset.index
         freq = pd.infer_freq(idx) or "h" if isinstance(idx, pd.DatetimeIndex) else "h"
@@ -268,37 +280,47 @@ class RollingRunner:
             context_y = context_data[self._y_col].to_numpy()
             context_index = context_data.index
 
+            # Build context_X and future_X based on futr/hist split or exog_cols
             context_X = None
-            if has_exog:
-                context_X = context_data[self._x_cols].to_numpy()
-
             future_X = None
             future_index = None
-            if has_exog:
-                futr_start = t + 1
-                futr_end = min(t + horizon, n_steps)
-                futr_data = self._forecast_data.iloc[futr_start:futr_end]
 
-                if len(futr_data) < horizon:
-                    pad_n = horizon - len(futr_data)
-                    last_row = (
-                        futr_data.iloc[[-1]]
-                        if len(futr_data) > 0
-                        else context_data.iloc[[-1]]
-                    )
-                    pad_df = pd.concat([last_row] * pad_n, ignore_index=True)
-                    last_time = (
-                        futr_data.index[-1]
-                        if len(futr_data) > 0
-                        else current_time
-                    )
-                    pad_df.index = pd.date_range(
-                        last_time, periods=pad_n + 1, freq=freq,
-                    )[1:]
-                    futr_data = pd.concat([futr_data, pad_df])
+            if has_futr or has_hist:
+                # Deep model path: futr_cols + hist_cols
+                all_context_cols = self._futr_cols + self._hist_cols
+                if all_context_cols:
+                    context_X = context_data[all_context_cols].to_numpy()
 
-                future_X = futr_data[self._x_cols].to_numpy()[:horizon]
-                future_index = futr_data.index[:horizon]
+                if has_futr:
+                    futr_start = t + 1
+                    futr_end = min(t + horizon, n_steps)
+                    futr_data = self._forecast_data.iloc[futr_start:futr_end]
+
+                    if len(futr_data) < horizon:
+                        pad_n = horizon - len(futr_data)
+                        last_row = (
+                            futr_data.iloc[[-1]]
+                            if len(futr_data) > 0
+                            else context_data.iloc[[-1]]
+                        )
+                        pad_df = pd.concat([last_row] * pad_n, ignore_index=True)
+                        last_time = (
+                            futr_data.index[-1]
+                            if len(futr_data) > 0
+                            else current_time
+                        )
+                        pad_df.index = pd.date_range(
+                            last_time, periods=pad_n + 1, freq=freq,
+                        )[1:]
+                        futr_data = pd.concat([futr_data, pad_df])
+
+                    # Only futr_cols go into future_X (no hist leakage)
+                    future_X = futr_data[self._futr_cols].to_numpy()[:horizon]
+                    future_index = futr_data.index[:horizon]
+
+            elif has_exog:
+                # Foundation/other model path: exog_cols unified (context only)
+                context_X = context_data[self._exog_cols].to_numpy()
 
             output = model.predict_from_context(
                 context_y=context_y,
@@ -416,7 +438,7 @@ class PerHorizonRunner(BaseModel):
         data_dir: Directory containing horizon_*.csv files.
         model_name: Registry key ("xgboost", "ngboost", "catboost", "lr", "gbm", "pgbm").
         y_col: Target column name in each CSV.
-        x_cols: Feature columns. None = use all except y_col.
+        exog_cols: Feature columns. None = use all except y_col.
         training_period: (start, end) for training split, shared across all horizons.
         forecast_period: (start, end) for forecast split, shared across all horizons.
         hyperparameter: Passed to every per-horizon model.
@@ -445,7 +467,7 @@ class PerHorizonRunner(BaseModel):
         data_dir: Union[str, Path],
         model_name: str,
         y_col: str,
-        x_cols: Optional[List[str]] = None,
+        exog_cols: Optional[List[str]] = None,
         training_period: Optional[Tuple] = None,
         forecast_period: Optional[Tuple] = None,
         hyperparameter: Optional[Dict] = None,
@@ -459,7 +481,7 @@ class PerHorizonRunner(BaseModel):
         self.data_dir = Path(data_dir)
         self.model_name = model_name
         self.y_col = y_col
-        self.x_cols = x_cols
+        self.exog_cols = exog_cols
         self.training_period = training_period
         self.forecast_period = forecast_period
         self.model_hyperparameter = dict(hyperparameter) if hyperparameter else {}
@@ -532,7 +554,7 @@ class PerHorizonRunner(BaseModel):
 
     def _fit_single_horizon(self, h: int) -> Tuple[int, BaseForecaster, pd.DataFrame]:
         """Train a single horizon model. Returns (h, fitted_model, full_df)."""
-        from src.models.machine_learning.registry import MODEL_REGISTRY
+        from src.core.registry import MODEL_REGISTRY
 
         df = self._load_dataset(h)
         model_cls = MODEL_REGISTRY.get(self.model_name)
@@ -542,7 +564,7 @@ class PerHorizonRunner(BaseModel):
         model = model_cls(
             dataset=train_df,
             y_col=self.y_col,
-            x_cols=self.x_cols,
+            exog_cols=self.exog_cols,
             hyperparameter=dict(self.model_hyperparameter),
             enable_logging=False,
             save_dir=str(self.base_dir / f"horizon_{h}"),
@@ -583,7 +605,6 @@ class PerHorizonRunner(BaseModel):
                 self._datasets[h_key] = df
 
         self.is_fitted_ = True
-        self._save_info()
 
         if self.enable_logging:
             self.logger.info("All horizon models trained.")
@@ -600,7 +621,7 @@ class PerHorizonRunner(BaseModel):
         """
         df = self._datasets[h]
         forecast_data = df.loc[self.forecast_period[0]:self.forecast_period[1]]
-        forecast_X = forecast_data[model.x_cols].to_numpy()
+        forecast_X = forecast_data[model.exog_cols].to_numpy()
         forecast_index = forecast_data.index
 
         result = model.forecast(forecast_X, forecast_index)
@@ -678,7 +699,7 @@ class PerHorizonRunner(BaseModel):
         model = self._models[h]
         df = self._datasets[h]
         forecast_data = df.loc[self.forecast_period[0]:self.forecast_period[1]]
-        forecast_X = forecast_data[model.x_cols].to_numpy()
+        forecast_X = forecast_data[model.exog_cols].to_numpy()
         forecast_index = forecast_data.index
         return model.forecast(forecast_X, forecast_index)
 
@@ -694,7 +715,7 @@ class PerHorizonRunner(BaseModel):
 
     def _load_model_specific(self, model_path: Path) -> None:
         """Load all per-horizon models from their saved directories."""
-        from src.models.machine_learning.registry import MODEL_REGISTRY
+        from src.core.registry import MODEL_REGISTRY
 
         for h in self._horizons:
             df = self._load_dataset(h)
@@ -705,7 +726,7 @@ class PerHorizonRunner(BaseModel):
             model = model_cls(
                 dataset=train_df,
                 y_col=self.y_col,
-                x_cols=self.x_cols,
+                exog_cols=self.exog_cols,
                 hyperparameter=dict(self.model_hyperparameter),
                 enable_logging=False,
                 save_dir=str(self.base_dir / f"horizon_{h}"),
