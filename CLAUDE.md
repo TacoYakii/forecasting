@@ -57,82 +57,98 @@ uv run pytest    # run tests
 ### Core Abstraction (`src/core/`)
 Every model's `forecast()` returns a **ForecastResult** object. Each Result can be converted to a **Distribution** object via `to_distribution(h)`.
 
-The concrete ForecastResult type is determined by the model's **training objective**:
+The concrete ForecastResult type and shape depend on the model family and forecasting method:
 
-```
-MLE-based:      Model.forecast() → ParametricForecastResult (1, H) or (N, 1)  → Runner concat → (N, H)
-Quantile-based: Model.forecast() → QuantileForecastResult   (1, H)            → Runner concat → (N, H)
-Sample-based:   Model.forecast() → SampleForecastResult     (1, n_samples, H) → Runner concat → (N, n_samples, H)
-```
+**Statistical Models** (RollingRunner — StatefulPredictor, recursive forecast → update_state loop):
 
-- **MLE-based — `ParametricForecastResult`:** The model assumes a parametric distribution and estimates its native parameters (e.g., mu/sigma for Normal). The **Distribution Registry** (Normal, StudentT, Gamma, Weibull, ...) maps distribution names to scipy distributions + parameter names.
-  - Statistical models (ARIMA-GARCH, etc.), ML models (NGBoost, CatBoost, PGBM), deep models with DistributionLoss
-- **Quantile-based — `QuantileForecastResult`:** The model directly predicts values at specific quantile levels, without assuming a distributional form.
-  - Deep models with MQLoss / IQLoss (DeepAR, TFT)
-- **Sample-based — `SampleForecastResult`:** The model generates draws (sample paths) from the predictive distribution, representing it empirically. This covers both Monte Carlo sampling from generative models and forward simulation of stochastic processes.
-  - Foundation models (Chronos, Moirai) via Monte Carlo sampling, GARCH family via simulated sample paths
+| Model | Method | Single Call | Final (after Runner) |
+|-------|--------|-------------|----------------------|
+| ARIMA-GARCH | `forecast(horizon)` | `ParametricForecastResult` (1, H) | **(N, H)** |
+| SARIMA-GARCH | `forecast(horizon)` | `ParametricForecastResult` (1, H) | **(N, H)** |
+| ARFIMA-GARCH | `forecast(horizon)` | `ParametricForecastResult` (1, H) | **(N, H)** |
+| GarchBase (all) | `simulate_paths(n_paths, horizon)` | `SampleForecastResult` (1, n_paths, H) | **(N, n_paths, H)** |
 
-Two Runner patterns orchestrate aggregation depending on the forecasting scheme:
-- **`RollingRunner`** — Recursive forecasting: forecast -> update_state loop. Each call returns (1, H) -> stacked along axis=0 to produce (N, H)
-- **`PerHorizonRunner`** — Cross-sectional forecasting: independent models per horizon predict all time points at once. Each call returns (N, 1) -> stacked along axis=1 to produce (N, H)
+**Machine Learning Models** (PerHorizonRunner — independent model per horizon):
+
+| Model | Method | Single Call | Final (after Runner) |
+|-------|--------|-------------|----------------------|
+| XGBoost, CatBoost, NGBoost, PGBM, LR | `forecast(X, idx)` | `ParametricForecastResult` (T, 1) | **(N_common, H)** |
+
+- T = test observations per horizon CSV, N_common = intersection of test indices across all H horizons
+
+**Deep Time Series Models** (RollingRunner — ContextPredictor, rolling context window):
+
+| Model | Loss | Single Call | Final |
+|-------|------|-------------|-------|
+| DeepAR / TFT | `DistributionLoss` | `ParametricForecastResult` (1, H) | **(N, H)** |
+| DeepAR / TFT | `MQLoss` / `IQLoss` | `QuantileForecastResult` (1, H) | **(N, H)** |
+
+**Foundation Models** (RollingRunner — ContextPredictor, Monte Carlo sampling):
+
+| Model | Single Call | Final |
+|-------|-------------|-------|
+| Chronos | `SampleForecastResult` (1, n_samples, H) | **(N, n_samples, H)** |
+| Moirai | `SampleForecastResult` (1, n_samples, H) | **(N, n_samples, H)** |
+
+Two Runner patterns orchestrate aggregation:
+- **`RollingRunner`** — Each step returns a single origin result, concatenated along axis=0 to produce (N, ...)
+- **`PerHorizonRunner`** — Each horizon model returns (T, 1), stacked along axis=1 to produce (N_common, H)
 
 ### Model Families (`src/models/`)
 
 | Family | Models | Runner | Output |
 |--------|--------|--------|--------|
-| `statistical/` | ARIMA-GARCH, SARIMA, ARFIMA | RollingRunner | ParametricForecastResult |
+| `statistical/` | ARIMA-GARCH, SARIMA-GARCH, ARFIMA-GARCH | RollingRunner (Stateful) | ParametricForecastResult / SampleForecastResult |
 | `machine_learning/` | CatBoost, NGBoost, PGBM, XGBoost, LR | PerHorizonRunner | ParametricForecastResult |
-| `deep_time_series/` | DeepAR, TFT (NeuralForecast) | NeuralForecast wrapper | DistributionLoss -> ParametricForecastResult, MQLoss -> QuantileForecastResult |
-| `foundation/` | Chronos, Moirai | from_pretrained() | SampleForecastResult |
-
-### Data Pipeline (`src/data/`)
-
-Download (KMA, ECMWF) -> NWP preprocessing (GRIB2/TXT readers, validators, derived variables) -> Training data builder (continuous/per-horizon, lag/exogenous features)
-
-### Hierarchical Forecasting (`src/pipelines/`)
-
-`BaseForecastRunner` -> `HierarchyForecastCoordinator` (selects best model per level/horizon by CRPS) -> `HierarchyForecastSampler` (generates ensemble datasets). The S matrix defines the aggregation structure.
+| `deep_time_series/` | DeepAR, TFT (NeuralForecast) | RollingRunner (Context) | DistributionLoss → Parametric, MQLoss → Quantile |
+| `foundation/` | Chronos, Moirai | RollingRunner (Context) | SampleForecastResult |
 
 ### Evaluation (`src/utils/`)
 
 - **nMAPE**: KPX day-ahead and real-time market evaluation
-- **CRPS**: Probabilistic calibration metrics
-- **Loss Registry**: Pluggable loss functions (RandomCRPSLoss, QuantileCRPSLoss, PinballLoss)
 
 ### Exogenous Variable Classification
 
 Exogenous variables are classified by **availability at prediction time**:
 
-| 분류 | 정의 | 예시 | 사용 모형 |
-|------|------|------|-----------|
-| **`futr_exog`** | 미래 값이 알려진 변수 | NWP 예보 (풍속, 온도) | Statistical, Deep |
-| **`hist_exog`** | 과거 값만 관측 가능 | 실측 풍속 (SCADA) | Deep only |
+| Category | Definition | Example | Used by |
+|----------|-----------|---------|---------|
+| **`futr_exog`** | Variables with known future values | NWP forecasts (wind speed, temperature) | Statistical, Deep |
+| **`hist_exog`** | Only past observations available | Measured wind speed (SCADA) | Deep only |
 
-Model family별 exog 인터페이스:
+Exogenous interface by model family:
 
 | Family | Parameter | Reason |
 |--------|-----------|--------|
-| Statistical (GARCH) | `exog_cols` | futr만 학습/예측에 사용 (hist 사용 시 leakage) |
-| ML (CatBoost 등) | `exog_cols` | per-horizon CSV에서 feature engineering 완료 |
-| Deep (DeepAR, TFT) | `futr_cols` + `hist_cols` | NeuralForecast `futr_exog_list`/`hist_exog_list` 분리 필요 |
-| Foundation (Moirai) | `exog_cols` | `past_feat_dynamic_real`로 context만 사용 |
-| Foundation (Chronos) | — | exog 미지원 |
+| Statistical (GARCH) | `exog_cols` | Only futr used for training/prediction (hist causes leakage) |
+| ML (CatBoost, etc.) | `exog_cols` | Feature engineering completed in per-horizon CSV |
+| Deep (DeepAR, TFT) | `futr_cols` + `hist_cols` | NeuralForecast requires separate `futr_exog_list`/`hist_exog_list` |
+| Foundation (Moirai) | `exog_cols` | Used as `past_feat_dynamic_real` (context only) |
+| Foundation (Chronos) | — | No exogenous support |
 
-Runner가 예측 시 미래 구간에는 **futr_exog만** 전달 (hist leakage 방지).
-Deep 모형의 인코더는 과거 구간에서 futr+hist 모두 활용하여 hidden state로 압축.
+Runner passes only **futr_exog** to the future horizon window (prevents hist leakage).
+Deep model encoders leverage both futr+hist in the past window, compressing into hidden state.
 
 > Design details: `docs/exogenous_variable_design.md`
 
 ## Key Patterns
 
-- **ForecastResult -> Distribution**: All Result objects can be converted to a Distribution object for a specific horizon via `to_distribution(h)` (ParametricDistribution or EmpiricalDistribution)
+- **ForecastResult -> Distribution**: All Result objects can be converted to a Distribution object for a specific horizon via `to_distribution(h)`. Marginal statistics (`mean`, `std`, `ppf`, `interval`) are only available on Distribution — ForecastResult delegates via `to_distribution(h)`. Design details: `docs/forecast_result_distribution_design.md`
 - **Distribution Registry**: Extensible mapping of distribution name -> scipy distribution + parameter names. Used only by MLE-based models; moment matching uses `mu_std_to_dist_params()`
 - **Experiment directory**: Auto-incrementing under `res/{ModelClass}/{exp_num}/`, stores logs, metadata, and serialized models
+
+## Design Principles
+
+- **Single Responsibility**: Each class has one responsibility. e.g., `ForecastResult` handles result storage/conversion only; `Distribution` handles probabilistic operations (`mean`, `ppf`, etc.). Do not duplicate distribution operations in Result — delegate via `to_distribution(h)`.
+- **Open-Closed**: Extend via Registry registration or subclassing, not by modifying existing code.
+- **Liskov Substitution**: `ForecastResult` subclasses (`Parametric`, `Quantile`, `Sample`) must be interchangeable through the parent interface.
+- **Interface Segregation**: Models implement only the interface they need (e.g., `StatefulPredictor` vs `ContextPredictor`).
+- **Dependency Inversion**: Runners depend on Predictor abstractions, not concrete model classes.
 
 ## Conventions
 
 - Code and docstrings in English; Korean terms used in domain-specific contexts (KPX market types, nMAPE)
 - Every model's `forecast()` returns a ForecastResult object (`ParametricForecastResult`, `QuantileForecastResult`, `SampleForecastResult`) — never raw mu/std
-- `etc/` contains config files and auxiliary scripts; `res/` stores experiment results (both gitignored)
+- `etc/` contains legacy pre-refactoring code and scripts (no longer in use); `res/` stores experiment results (both gitignored)
 - Notebooks in `notebooks/` are for exploration and testing, not production code
 - When adding tests, update the corresponding `TEST_*.md` file in the test directory to document what each test verifies (e.g., `docs/TEST_EXOG_SPLIT.md`)

@@ -59,7 +59,7 @@ class ChronosForecaster(BaseFoundationModel):
         ... )
         >>> model.fit()                      # loads pretrained weights
         >>> result = model.predict()         # → QuantileForecastResult
-        >>> result.quantile(0.9, h=6)
+        >>> result.to_distribution(6).ppf(0.9)
     """
 
     def _load_pretrained(self) -> None:

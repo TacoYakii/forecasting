@@ -53,7 +53,7 @@ _DEFAULT_DEEP_HP = {
     "learning_rate": 0.001,
     "early_stop_patience_steps": -1,  # -1 = disabled
     "val_size": 0,                  # validation set size (number of timesteps)
-    "level": [80, 90],              # confidence levels for quantile output
+    "level": list(range(2, 100, 2)),  # confidence levels → 99 quantiles (0.01, ..., 0.99)
     "scaler_type": "robust",        # NeuralForecast internal scaler
     "loss_type": None,              # "distribution" | "quantile" | "implicit_quantile" (None = subclass default)
     "distribution": None,           # for loss_type="distribution": "StudentT", "Normal", etc.
@@ -95,7 +95,7 @@ class BaseDeepModel(BaseForecaster):
         learning_rate (float): Learning rate. Default: 0.001
         early_stop_patience_steps (int): Early stopping patience. -1 = disabled.
         val_size (int): Validation set size in timesteps. Default: 0
-        level (list[int]): Confidence levels for quantile output. Default: [80, 90]
+        level (list[int]): Confidence levels for quantile output. Default: range(2, 100, 2) → 99 quantiles
         scaler_type (str): NeuralForecast internal scaler. Default: "robust"
 
     Example:
@@ -105,7 +105,7 @@ class BaseDeepModel(BaseForecaster):
         ... )
         >>> model.fit()
         >>> result = model.forecast()        # → QuantileForecastResult
-        >>> result.quantile(0.9, h=6)        # 90th percentile at 6-step-ahead
+        >>> result.to_distribution(6).ppf(0.9)  # 90th percentile at 6-step-ahead
     """
 
     def __init__(

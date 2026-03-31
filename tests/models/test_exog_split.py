@@ -22,6 +22,20 @@ import matplotlib.pyplot as plt
 from src.core.forecast_results import ParametricForecastResult
 
 
+def _result_mean(result):
+    """Reconstruct (N, H) mean array from per-horizon distributions."""
+    return np.column_stack([
+        result.to_distribution(h).mean() for h in range(1, result.horizon + 1)
+    ])
+
+
+def _result_std(result):
+    """Reconstruct (N, H) std array from per-horizon distributions."""
+    return np.column_stack([
+        result.to_distribution(h).std() for h in range(1, result.horizon + 1)
+    ])
+
+
 # ======================================================================
 # Synthetic data: futr_exog + hist_exog + target
 # ======================================================================
@@ -198,7 +212,7 @@ class TestStatisticalExog:
         result = model.forecast(horizon=HORIZON, x_future=x_future)
         assert isinstance(result, ParametricForecastResult)
         assert result.params["loc"].shape == (1, HORIZON)
-        assert np.all(np.isfinite(result.mean()))
+        assert np.all(np.isfinite(_result_mean(result)))
 
         # Plot
         forecast_index = exog_forecast_df.index[:HORIZON]
@@ -207,8 +221,8 @@ class TestStatisticalExog:
             train_df=exog_df.loc[:TRAIN_END],
             forecast_index=forecast_index,
             observed=observed,
-            predicted_mu=result.mean().ravel(),
-            predicted_std=result.std().ravel(),
+            predicted_mu=_result_mean(result).ravel(),
+            predicted_std=_result_std(result).ravel(),
             title="ARIMA-GARCH | exog_cols=FUTR only",
             filename="statistical_arima_garch_futr.png",
         )
@@ -238,7 +252,7 @@ class TestStatisticalExog:
         x_future = exog_forecast_df[FUTR_COLS].to_numpy()[1:HORIZON + 1]
         result = model.forecast(horizon=HORIZON, x_future=x_future)
         assert isinstance(result, ParametricForecastResult)
-        assert np.all(np.isfinite(result.mean()))
+        assert np.all(np.isfinite(_result_mean(result)))
 
     def test_arima_garch_exog_shape(self, exog_train_df, tmp_path):
         """Verify model stores correct number of exog features."""
@@ -293,17 +307,19 @@ class TestMLExog:
         assert isinstance(result, ParametricForecastResult)
         T = len(exog_forecast_df)
         assert result.params["loc"].shape == (T, 1)
-        assert np.all(np.isfinite(result.mean()))
-        assert np.all(result.mean() > -50)
-        assert np.all(result.mean() < 200)
+        mu = _result_mean(result)
+        sigma = _result_std(result)
+        assert np.all(np.isfinite(mu))
+        assert np.all(mu > -50)
+        assert np.all(mu < 200)
 
         # Plot
         _save_forecast_plot(
             train_df=exog_df.loc[:TRAIN_END],
             forecast_index=exog_forecast_df.index,
             observed=exog_forecast_df[Y_COL].to_numpy(),
-            predicted_mu=result.mean().ravel(),
-            predicted_std=result.std().ravel(),
+            predicted_mu=mu.ravel(),
+            predicted_std=sigma.ravel(),
             title=f"{model_name.upper()} | exog_cols=FUTR+HIST",
             filename=f"ml_{model_name}_exog.png",
         )
@@ -333,10 +349,12 @@ class TestMLExog:
         )
 
         # Both should be valid
-        assert np.all(np.isfinite(result_futr.mean()))
-        assert np.all(np.isfinite(result_all.mean()))
+        mu_futr = _result_mean(result_futr)
+        mu_all = _result_mean(result_all)
+        assert np.all(np.isfinite(mu_futr))
+        assert np.all(np.isfinite(mu_all))
         # But predictions should differ (hist adds information)
-        assert not np.allclose(result_futr.mean(), result_all.mean())
+        assert not np.allclose(mu_futr, mu_all)
 
         # Plot: compare futr-only vs futr+hist
         PLOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -346,8 +364,8 @@ class TestMLExog:
         train_plot = exog_df.loc[plot_start:TRAIN_END]
         ax.plot(train_plot.index, train_plot[Y_COL], "k-", label="Train", alpha=0.5)
         ax.plot(exog_forecast_df.index, exog_forecast_df[Y_COL], "b-", label="Observed", linewidth=1.5)
-        ax.plot(exog_forecast_df.index, result_futr.mean().ravel(), "r--", label="LR (futr only)")
-        ax.plot(exog_forecast_df.index, result_all.mean().ravel(), "g--", label="LR (futr+hist)")
+        ax.plot(exog_forecast_df.index, mu_futr.ravel(), "r--", label="LR (futr only)")
+        ax.plot(exog_forecast_df.index, mu_all.ravel(), "g--", label="LR (futr+hist)")
         ax.axvline(pd.Timestamp(FORECAST_START), color="gray", linestyle=":", alpha=0.5)
         ax.set_title("LR | futr-only vs futr+hist comparison")
         ax.set_ylabel(Y_COL)
@@ -430,9 +448,11 @@ class TestDeepExog:
         result = model.forecast(future_X=future_X, future_index=future_index)
         assert isinstance(result, ParametricForecastResult)
         assert result.params["loc"].shape == (1, HORIZON)
-        assert np.all(np.isfinite(result.mean()))
-        assert np.all(result.mean() > -50)
-        assert np.all(result.mean() < 200)
+        mu = _result_mean(result)
+        sigma = _result_std(result)
+        assert np.all(np.isfinite(mu))
+        assert np.all(mu > -50)
+        assert np.all(mu < 200)
 
         # Plot
         observed = exog_full_df.loc[FORECAST_START:][Y_COL].to_numpy()[:HORIZON]
@@ -440,8 +460,8 @@ class TestDeepExog:
             train_df=exog_df.loc[:TRAIN_END],
             forecast_index=future_index,
             observed=observed,
-            predicted_mu=result.mean().ravel(),
-            predicted_std=result.std().ravel(),
+            predicted_mu=mu.ravel(),
+            predicted_std=sigma.ravel(),
             title="DeepAR | futr_cols + hist_cols",
             filename="deep_deepar_futr_hist.png",
         )
@@ -482,7 +502,9 @@ class TestDeepExog:
         )
         assert isinstance(result, ParametricForecastResult)
         assert result.params["loc"].shape == (1, HORIZON)
-        assert np.all(np.isfinite(result.mean()))
+        mu = _result_mean(result)
+        sigma = _result_std(result)
+        assert np.all(np.isfinite(mu))
 
         # Plot
         observed = future_data[Y_COL].to_numpy()[:HORIZON]
@@ -490,8 +512,8 @@ class TestDeepExog:
             train_df=exog_df.loc[:TRAIN_END],
             forecast_index=future_index,
             observed=observed,
-            predicted_mu=result.mean().ravel(),
-            predicted_std=result.std().ravel(),
+            predicted_mu=mu.ravel(),
+            predicted_std=sigma.ravel(),
             title="DeepAR | predict_from_context (futr+hist ctx, futr future)",
             filename="deep_deepar_predict_from_context.png",
         )
@@ -517,9 +539,11 @@ class TestDeepExog:
 
         result = model.forecast(future_X=future_X, future_index=future_index)
         assert isinstance(result, ParametricForecastResult)
-        assert np.all(np.isfinite(result.mean()))
-        assert np.all(result.mean() > -50)
-        assert np.all(result.mean() < 200)
+        mu = _result_mean(result)
+        sigma = _result_std(result)
+        assert np.all(np.isfinite(mu))
+        assert np.all(mu > -50)
+        assert np.all(mu < 200)
 
         # Plot
         observed = future_df[Y_COL].to_numpy()[:HORIZON]
@@ -527,8 +551,8 @@ class TestDeepExog:
             train_df=exog_df.loc[:TRAIN_END],
             forecast_index=future_index,
             observed=observed,
-            predicted_mu=result.mean().ravel(),
-            predicted_std=result.std().ravel(),
+            predicted_mu=mu.ravel(),
+            predicted_std=sigma.ravel(),
             title="DeepAR | futr_cols only (no hist)",
             filename="deep_deepar_futr_only.png",
         )

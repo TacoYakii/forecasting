@@ -21,34 +21,71 @@ src/
 
 ## ForecastResult
 
-Every model's `forecast()` returns a **ForecastResult** object. The concrete type depends on the model's training objective:
+Every model's `forecast()` returns a **ForecastResult** object. The concrete type and shape depend on the model family and forecasting method.
 
-```
-MLE-based:      Model.forecast() → ParametricForecastResult  (N, H)
-Quantile-based: Model.forecast() → QuantileForecastResult    (N, H)
-Sample-based:   Model.forecast() → SampleForecastResult      (N, n_samples, H)
-```
+### Return Shape by Model and Method
 
-### ParametricForecastResult
+#### Statistical Models (RollingRunner — StatefulPredictor)
 
-The model assumes a parametric distribution and estimates its native parameters (e.g., mu/sigma for Normal, mu/sigma/df for Student-t). The **Distribution Registry** maps distribution names to scipy distributions and parameter names.
+Recursive forecasting: `forecast()` → `update_state()` loop. Each call produces a single forecast origin.
 
-- Statistical models: ARIMA-GARCH, SARIMA-GARCH, ARFIMA-GARCH
-- ML models: NGBoost, CatBoost, PGBM, XGBoost, LR, GBM
-- Deep models with `DistributionLoss`: DeepAR, TFT
+| Model | Method | Single Call Shape | Runner Aggregation | Final Shape |
+|-------|--------|-------------------|--------------------|-------------|
+| ARIMA-GARCH | `forecast(horizon)` | `ParametricForecastResult` (1, H) | concat axis=0 | **(N, H)** |
+| SARIMA-GARCH | `forecast(horizon)` | `ParametricForecastResult` (1, H) | concat axis=0 | **(N, H)** |
+| ARFIMA-GARCH | `forecast(horizon)` | `ParametricForecastResult` (1, H) | concat axis=0 | **(N, H)** |
+| GarchBase (all) | `simulate_paths(n_paths, horizon)` | `SampleForecastResult` (1, n_paths, H) | concat axis=0 | **(N, n_paths, H)** |
 
-### QuantileForecastResult
+#### Machine Learning Models (PerHorizonRunner)
 
-The model directly predicts values at specific quantile levels without assuming a distributional form.
+Cross-sectional forecasting: independent model per horizon predicts all time points at once.
 
-- Deep models with `MQLoss` / `IQLoss`: DeepAR, TFT
+| Model | Method | Single Call Shape | Runner Aggregation | Final Shape |
+|-------|--------|-------------------|--------------------|-------------|
+| XGBoost | `forecast(X, idx)` | `ParametricForecastResult` (T, 1) | stack axis=1 | **(N_common, H)** |
+| CatBoost | `forecast(X, idx)` | `ParametricForecastResult` (T, 1) | stack axis=1 | **(N_common, H)** |
+| NGBoost | `forecast(X, idx)` | `ParametricForecastResult` (T, 1) | stack axis=1 | **(N_common, H)** |
+| PGBM | `forecast(X, idx)` | `ParametricForecastResult` (T, 1) | stack axis=1 | **(N_common, H)** |
+| LR | `forecast(X, idx)` | `ParametricForecastResult` (T, 1) | stack axis=1 | **(N_common, H)** |
 
-### SampleForecastResult
+- **T** = number of test observations in horizon-specific CSV (varies per horizon)
+- **N_common** = intersection of test indices across all H horizons
 
-The model generates draws (sample paths) from the predictive distribution, representing it empirically. Covers both Monte Carlo sampling from generative models and forward simulation of stochastic processes.
+#### Deep Time Series Models (RollingRunner — ContextPredictor)
 
-- Foundation models: Chronos, Moirai (Monte Carlo sampling)
-- GARCH family: simulated sample paths via `simulate_paths()`
+Rolling context window forecasting via NeuralForecast. Loss function determines result type.
+
+| Model | Loss | Method | Single Call Shape | Final Shape |
+|-------|------|--------|-------------------|-------------|
+| DeepAR | `DistributionLoss` | `predict_from_context()` | `ParametricForecastResult` (1, H) | **(N, H)** |
+| DeepAR | `MQLoss` / `IQLoss` | `predict_from_context()` | `QuantileForecastResult` (1, H) | **(N, H)** |
+| TFT | `DistributionLoss` | `predict_from_context()` | `ParametricForecastResult` (1, H) | **(N, H)** |
+| TFT | `MQLoss` / `IQLoss` | `predict_from_context()` | `QuantileForecastResult` (1, H) | **(N, H)** |
+
+#### Foundation Models (RollingRunner — ContextPredictor)
+
+Rolling context window with Monte Carlo sampling from pretrained models.
+
+| Model | Method | Single Call Shape | Final Shape |
+|-------|--------|-------------------|-------------|
+| Chronos | `predict_from_context()` | `SampleForecastResult` (1, n_samples, H) | **(N, n_samples, H)** |
+| Moirai | `predict_from_context()` | `SampleForecastResult` (1, n_samples, H) | **(N, n_samples, H)** |
+
+### Dimension Reference
+
+| Symbol | Meaning |
+|--------|---------|
+| **N** | Number of basis times (forecast origins / rolling steps) |
+| **H** | Forecast horizon (number of steps ahead) |
+| **n_samples** | Number of Monte Carlo / stochastic simulation paths |
+| **T** | Number of test observations per horizon (PerHorizonRunner) |
+| **N_common** | Intersection of test indices across all horizons (PerHorizonRunner) |
+
+### ForecastResult Types
+
+- **`ParametricForecastResult`** — params: `Dict[str, np.ndarray]`, each value shape matches the result shape above (e.g., Normal: `{"loc": (N, H), "scale": (N, H)}`)
+- **`QuantileForecastResult`** — quantiles_data: `Dict[float, np.ndarray]`, each value shape `(N, H)` (e.g., `{0.1: (N, H), 0.5: (N, H), 0.9: (N, H)}`)
+- **`SampleForecastResult`** — samples: `np.ndarray` of shape `(N, n_samples, H)`
 
 ### ForecastResult to Distribution
 
@@ -64,7 +101,7 @@ dist = result.to_distribution(h=6)
 
 dist.ppf([0.1, 0.5, 0.9])   # quantiles
 dist.mean()                   # point forecast
-dist.crps(observed)           # CRPS score
+dist.sample(1000)             # random draws
 ```
 
 ## Runner
@@ -73,8 +110,8 @@ Two Runner patterns orchestrate forecasting depending on the model type:
 
 | Runner | Strategy | Models |
 |--------|----------|--------|
-| `RollingRunner` | Recursive: forecast → update_state loop. Each step returns (1, H), stacked to (N, H). | Statistical, Deep, Foundation |
-| `PerHorizonRunner` | Cross-sectional: independent model per horizon. Each model returns (N, 1), stacked to (N, H). | Machine Learning |
+| `RollingRunner` | Recursive: forecast → update_state (Stateful) or predict_from_context (Context) loop. Each step returns a single origin, stacked along axis=0 to (N, ...). | Statistical, Deep, Foundation |
+| `PerHorizonRunner` | Cross-sectional: independent model per horizon. Each model returns (T, 1), stacked along axis=1 to (N_common, H). | Machine Learning |
 
 ## Setup
 

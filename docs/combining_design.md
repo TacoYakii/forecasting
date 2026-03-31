@@ -21,8 +21,8 @@ src/models/combining/
 └── equal_weight.py      # EqualWeightCombiner (동일 가중 baseline)
 ```
 
-> `src/models/combining/`은 이미 디렉터리로 존재함. 기존 `etc/combining/angular.py`의
-> 핵심 로직을 `src/models/combining/angular.py`로 리팩터링.
+> `src/models/combining/`은 이미 디렉터리로 존재함. 기존 `PARK/Combine/def_combine.py`의
+> 핵심 로직을 `src/models/combining/` 하위 모듈로 리팩터링.
 
 ---
 
@@ -53,10 +53,10 @@ src/models/combining/
                          │  List[Distribution] (M개)│
                          │    ↓                     │
                          │  _combine_distributions()│◄── 서브클래스 구현
-                         │    → (N_test, n_samples) │
+                         │    → (N_test, Q)         │
                          │    ↓                     │
                          │  조립: SampleForecastResult
-                         │    (N_test, n_samples, H)│
+                         │    (N_test, Q, H)        │
                          └─────────────────────────┘
 ```
 
@@ -66,10 +66,10 @@ src/models/combining/
 |------|-------|------|
 | `ForecastResult` | `(N, H)` | 모형별 전체 결과 |
 | `to_distribution(h)` | `Distribution(T=N)` | 특정 horizon의 Distribution |
-| `dist.sample(n_samples)` | `(N, n_samples)` | Distribution에서 샘플 추출 |
+| `dist.ppf(quantile_levels)` | `(N, Q)` | 고정 quantile levels에서 결정론적 추출 |
 | `extract_distributions(h)` | `List[Distribution]` len=M | M개 모형의 같은 horizon Distribution |
-| `_combine_distributions(h)` | `(N, n_samples)` | 결합된 샘플 |
-| 최종 결과 | `SampleForecastResult(N, n_samples, H)` | H개 horizon 조립 |
+| `_combine_distributions(h)` | `(N, Q)` | 결합된 값 (cross-quantile mixing 가능) |
+| 최종 결과 | `SampleForecastResult(N, Q, H)` | H개 horizon 조립 (Q를 sample 차원으로 사용) |
 
 ---
 
@@ -102,7 +102,8 @@ class BaseCombiner(ABC):
     """여러 모형의 ForecastResult를 결합하는 추상 베이스 클래스.
 
     공통 역할:
-        - ForecastResult 리스트의 유효성 검증 (basis_index 일치, horizon 일치)
+        - ForecastResult 리스트의 유효성 검증 (horizon 일치)
+        - 공통 basis_index 추출 및 결과 정렬 (_align_results)
         - horizon별 Distribution 추출 (extract_distributions)
         - fit/combine 호출 시 horizon loop 관리
         - 최종 SampleForecastResult 조립
@@ -112,15 +113,16 @@ class BaseCombiner(ABC):
         - _combine_distributions(): 학습된 파라미터로 Distribution 결합
 
     Attributes:
-        n_samples (int): combining 결과의 샘플 수 (default: 1000).
+        n_quantiles (int): combining에 사용할 quantile level 수 (default: 1000).
+        quantile_levels (np.ndarray): 고정 quantile levels, shape (n_quantiles,).
+            (0, 1) 구간을 균등 분할. 모든 모형에서 동일한 level로 추출.
         fitted_params_ (Dict[int, Any]): horizon별 학습된 파라미터.
 
     Args:
-        n_samples: 결합 결과 생성 시 사용할 샘플 수.
-        seed: 재현성을 위한 random seed.
+        n_quantiles: quantile level 수. 클수록 분포 근사가 정밀해짐.
 
     Example:
-        >>> combiner = AngularCombiner(n_samples=1000, seed=42)
+        >>> combiner = AngularCombiner(n_quantiles=99)
         >>> combiner.fit(train_results, observed)
         >>> combined = combiner.combine(test_results)
         >>> combined.to_distribution(6).ppf([0.1, 0.5, 0.9])
@@ -128,16 +130,15 @@ class BaseCombiner(ABC):
 
     def __init__(
         self,
-        n_samples: int = 1000,
-        seed: Optional[int] = None,
+        n_quantiles: int = 99,
     ):
-        self.n_samples = n_samples
-        self.seed = seed
+        self.n_quantiles = n_quantiles
+        self.quantile_levels = np.linspace(0, 1, n_quantiles + 2)[1:-1]  # (0, 1) 개구간
         self.is_fitted_ = False
         self.fitted_params_: Dict[int, Any] = {}
         self._horizon: Optional[int] = None
 
-    # ── Validation ──
+    # ── Validation & Alignment ──
 
     def _validate_results(
         self, results: List[BaseForecastResult]
@@ -147,7 +148,11 @@ class BaseCombiner(ABC):
         검증 항목:
             1. 최소 2개 이상의 모형
             2. 모든 모형의 horizon이 동일
-            3. 모든 모형의 basis_index가 동일
+
+        Note:
+            basis_index 일치는 검증하지 않음. futr_exog 사용 모형과
+            미사용 모형의 예측 길이가 다를 수 있으므로, _align_results()에서
+            공통 index를 추출하여 정렬함.
 
         Raises:
             ValueError: 검증 실패 시.
@@ -165,12 +170,52 @@ class BaseCombiner(ABC):
                     f"results[{i}].horizon={r.horizon}"
                 )
 
-        base_idx = results[0].basis_index
-        for i, r in enumerate(results[1:], 1):
-            if not r.basis_index.equals(base_idx):
-                raise ValueError(
-                    f"basis_index 불일치: results[0] vs results[{i}]"
-                )
+    def _align_results(
+        self,
+        results: List[BaseForecastResult],
+    ) -> List[BaseForecastResult]:
+        """모든 ForecastResult를 공통 basis_index로 정렬.
+
+        futr_exog를 사용하는 모형과 미사용 모형의 예측 구간이 다를 수
+        있으므로, 모든 results의 basis_index 교집합을 구한 뒤 각 result를
+        공통 index로 슬라이싱한다.
+
+        내부적으로 BaseForecastResult.reindex(common_idx)를 호출.
+
+        Args:
+            results: M개 모형의 ForecastResult 리스트.
+
+        Returns:
+            List[BaseForecastResult]: 공통 index로 정렬된 결과 리스트.
+                이미 모든 basis_index가 동일하면 원본 그대로 반환.
+
+        Raises:
+            ValueError: 공통 index가 비어있는 경우.
+
+        Example:
+            >>> # ARIMA (futr_exog 사용): basis_index 길이 300
+            >>> # Chronos (exog 없음):    basis_index 길이 350
+            >>> aligned = combiner._align_results([arima_result, chronos_result])
+            >>> len(aligned[0])  # 공통 구간 <= 300
+        """
+        common_idx = results[0].basis_index
+        for r in results[1:]:
+            common_idx = common_idx.intersection(r.basis_index)
+
+        if len(common_idx) == 0:
+            raise ValueError(
+                "공통 basis_index가 비어있습니다. "
+                "모형들의 예측 구간이 전혀 겹치지 않습니다."
+            )
+
+        # 이미 모든 index가 동일하면 불필요한 복사 방지
+        all_equal = all(
+            r.basis_index.equals(common_idx) for r in results
+        )
+        if all_equal:
+            return results
+
+        return [r.reindex(common_idx) for r in results]
 
     # ── Distribution Extraction (공통) ──
 
@@ -195,31 +240,37 @@ class BaseCombiner(ABC):
     def fit(
         self,
         results: List[BaseForecastResult],
-        observed: np.ndarray,
+        observed: pd.DataFrame,
     ) -> "BaseCombiner":
         """Training period ForecastResult들로 combining 파라미터 학습.
 
         각 horizon h에 대해:
-            1. extract_distributions(results, h) → List[Distribution]
-            2. _fit_horizon(h, dists, observed_h) → 파라미터 저장
+            1. _align_results(results) → 공통 index로 정렬
+            2. extract_distributions(results, h) → List[Distribution]
+            3. _fit_horizon(h, dists, observed_h) → 파라미터 저장
 
         Args:
             results: M개 모형의 training period ForecastResult.
-                     각 (N_train, H) shape.
-            observed: 관측값 배열, shape (N_train, H).
-                      observed[:, h-1]이 horizon h의 관측값.
+                     각 (N_train, H) shape. basis_index가 다를 수 있음.
+            observed: 관측값 DataFrame, shape (N_total, H), index가
+                      basis times를 포함. 공통 index에 맞춰 자동 정렬됨.
 
         Returns:
             Self: method chaining 지원.
         """
         self._validate_results(results)
+        results = self._align_results(results)
 
         H = results[0].horizon
         self._horizon = H
+        common_idx = results[0].basis_index
+
+        # observed도 공통 index에 맞춰 정렬
+        observed_aligned = observed.loc[common_idx].values  # (N_common, H)
 
         for h in range(1, H + 1):
             dists = self.extract_distributions(results, h)
-            observed_h = observed[:, h - 1]  # (N_train,)
+            observed_h = observed_aligned[:, h - 1]  # (N_common,)
             self.fitted_params_[h] = self._fit_horizon(h, dists, observed_h)
 
         self.is_fitted_ = True
@@ -233,17 +284,24 @@ class BaseCombiner(ABC):
     ) -> SampleForecastResult:
         """Test period ForecastResult들을 결합하여 SampleForecastResult 반환.
 
+        입력은 고정 quantile levels에서 결정론적으로 추출하지만,
+        combining 방법에 따라 cross-quantile mixing이 발생할 수 있으므로
+        (예: angular combining의 degree > 0) 결과는 sample로 취급.
+
         각 horizon h에 대해:
-            1. extract_distributions(results, h) → List[Distribution]
-            2. _combine_distributions(h, dists) → (N_test, n_samples)
-        결과를 stack하여 (N_test, n_samples, H) 반환.
+            1. _align_results(results) → 공통 index로 정렬
+            2. extract_distributions(results, h) → List[Distribution]
+            3. _combine_distributions(h, dists) → (N_common, Q)
+        결과를 조립하여 SampleForecastResult(N_common, Q, H) 반환.
 
         Args:
             results: M개 모형의 test period ForecastResult.
-                     각 (N_test, H) shape.
+                     각 (N_test, H) shape. basis_index가 다를 수 있음.
 
         Returns:
-            SampleForecastResult: shape (N_test, n_samples, H).
+            SampleForecastResult: shape (N_common, Q, H).
+                Q = n_quantiles. cross-quantile mixing으로 인해
+                원래 quantile level 대응이 깨질 수 있으므로 sample로 반환.
 
         Raises:
             RuntimeError: fit()이 호출되지 않은 경우.
@@ -252,20 +310,20 @@ class BaseCombiner(ABC):
             raise RuntimeError("fit()을 먼저 호출해야 합니다.")
 
         self._validate_results(results)
+        results = self._align_results(results)
 
         H = results[0].horizon
-        N = len(results[0].basis_index)
         basis_index = results[0].basis_index
 
-        samples_per_h = []
+        combined_per_h = []  # List of (N, Q)
         for h in range(1, H + 1):
             dists = self.extract_distributions(results, h)
             combined_h = self._combine_distributions(h, dists)
-            # combined_h shape: (N, n_samples)
-            samples_per_h.append(combined_h)
+            # combined_h shape: (N, Q)
+            combined_per_h.append(combined_h)
 
-        # Stack: List of (N, n_samples) → (N, n_samples, H)
-        samples_all = np.stack(samples_per_h, axis=2)
+        # Stack: List of (N, Q) → (N, Q, H)
+        samples_all = np.stack(combined_per_h, axis=2)
 
         return SampleForecastResult(
             samples=samples_all,
@@ -306,7 +364,8 @@ class BaseCombiner(ABC):
             distributions: M개 모형의 Distribution, 각 T=N_test.
 
         Returns:
-            np.ndarray: 결합된 샘플, shape (N, n_samples).
+            np.ndarray: 결합된 quantile values, shape (N, Q).
+                Q = len(self.quantile_levels).
         """
         ...
 ```
@@ -375,51 +434,51 @@ class AngularCombiner(BaseCombiner):
         base_losses_ (Dict[int, np.ndarray]): horizon별 모형별 base CRPS loss.
 
     Args:
-        n_samples: combining 결과 샘플 수 (default: 1000).
+        n_quantiles: combining 결과 quantile 수 (default: 99).
         seed: random seed.
         config: 최적화 설정. None이면 기본값 사용.
 
     Example:
-        >>> combiner = AngularCombiner(n_samples=1000)
+        >>> combiner = AngularCombiner(n_quantiles=99)
         >>> combiner.fit(train_results, observed)
         >>> combined = combiner.combine(test_results)
     """
 
     def __init__(
         self,
-        n_samples: int = 1000,
-        seed: Optional[int] = None,
+        n_quantiles: int = 99,
         config: Optional[AngularCombineConfig] = None,
     ):
-        super().__init__(n_samples=n_samples, seed=seed)
+        super().__init__(n_quantiles=n_quantiles)
         self.config = config or AngularCombineConfig()
         self.base_losses_: Dict[int, np.ndarray] = {}
 
-    # ── Distribution → Sample 변환 (내부 헬퍼) ──
+    # ── Distribution → Quantile Values 변환 (내부 헬퍼) ──
 
-    def _distributions_to_samples(
+    def _distributions_to_quantiles(
         self,
         distributions: List[Distribution],
     ) -> jnp.ndarray:
-        """M개 Distribution에서 샘플을 추출하여 (N, M, n_samples) 배열로 변환.
+        """M개 Distribution에서 고정 quantile levels로 값을 추출하여 (N, M, Q) 배열로 변환.
 
-        각 Distribution에서 self.n_samples만큼 샘플을 뽑고, 정렬 후 스택.
+        모든 모형에서 동일한 self.quantile_levels를 사용하므로
+        결정론적이고 재현 가능한 결과를 보장.
 
         Args:
             distributions: M개 Distribution, 각 T=N.
 
         Returns:
-            jnp.ndarray: shape (N, M, n_samples), sorted along sample axis.
+            jnp.ndarray: shape (N, M, Q), Q = len(self.quantile_levels).
+                         quantile level 순서대로 정렬되어 있음.
         """
-        samples_list = []
+        quantiles_list = []
         for dist in distributions:
-            s = dist.sample(self.n_samples, seed=self.seed)  # (N, n_samples)
-            s = np.sort(s, axis=1)
-            samples_list.append(s)
+            q = dist.ppf(self.quantile_levels)  # (N, Q)
+            quantiles_list.append(q)
 
-        # Stack: (M, N, n_samples) → transpose → (N, M, n_samples)
-        stacked = np.stack(samples_list, axis=0)  # (M, N, n_samples)
-        stacked = stacked.transpose(1, 0, 2)      # (N, M, n_samples)
+        # Stack: (M, N, Q) → transpose → (N, M, Q)
+        stacked = np.stack(quantiles_list, axis=0)  # (M, N, Q)
+        stacked = stacked.transpose(1, 0, 2)        # (N, M, Q)
         return jnp.array(stacked)
 
     # ── Base CRPS Loss 계산 ──
@@ -431,6 +490,8 @@ class AngularCombiner(BaseCombiner):
     ) -> np.ndarray:
         """각 모형의 CRPS loss를 계산.
 
+        고정 quantile levels에서 추출한 quantile values로 CRPS를 계산.
+
         Args:
             distributions: M개 Distribution.
             observed: 관측값, shape (N,).
@@ -440,10 +501,10 @@ class AngularCombiner(BaseCombiner):
         """
         losses = []
         for dist in distributions:
-            samples = dist.sample(self.n_samples, seed=self.seed)  # (N, n_samples)
+            q_values = dist.ppf(self.quantile_levels)  # (N, Q)
             crps_vals = jax.vmap(
                 crps_numerical_j, in_axes=(0, 0, None)
-            )(jnp.array(observed), jnp.array(samples), True)
+            )(jnp.array(observed), jnp.array(q_values), True)
             losses.append(float(jnp.mean(crps_vals)))
         return np.array(losses)
 
@@ -460,30 +521,31 @@ class AngularCombiner(BaseCombiner):
         """Angular combining 핵심 연산.
 
         Args:
-            dataset: (N, M, n_samples), sorted along sample axis.
+            dataset: (N, M, Q), 고정 quantile levels에서 추출한 값.
+                     quantile level 순으로 정렬되어 있음.
             weight: (M,), combining 가중치.
             beta: 가중치 파라미터 (이 함수에서는 사용하지 않음, weight에 이미 반영).
             degree: angular combining 강도.
             key: JAX random key.
 
         Returns:
-            jnp.ndarray: (N, n_samples), 결합된 샘플.
+            jnp.ndarray: (N, Q), 결합된 quantile values.
         """
-        N, M, n_samples = dataset.shape
-        quantile_values = jnp.linspace(0, 1, n_samples)
+        N, M, Q = dataset.shape
+        quantile_values = jnp.linspace(0, 1, Q)
 
         if degree < 1e-3:
             # 단순 가중 평균
-            # dataset: (N, M, n_samples) → transpose → (N, n_samples, M)
+            # dataset: (N, M, Q) → transpose → (N, Q, M)
             res = jnp.sum(
                 dataset.transpose(0, 2, 1) * weight, axis=2
-            )  # (N, n_samples)
+            )  # (N, Q)
         else:
             # Angular combining
             indices = jax.random.choice(
                 key=key,
                 a=M,
-                shape=(N, n_samples),
+                shape=(N, Q),
                 replace=True,
                 p=weight,
             )
@@ -491,9 +553,9 @@ class AngularCombiner(BaseCombiner):
             s0 = (dataset + quantile_values / degree).transpose(0, 2, 1)
             s = jnp.take_along_axis(s0, indices[..., None], axis=2).squeeze(-1)
             s_sorted = jnp.sort(s, axis=1)
-            res = s_sorted - jnp.arange(n_samples) / (n_samples * degree)
+            res = s_sorted - jnp.arange(Q) / (Q * degree)
 
-        return res  # (N, n_samples)
+        return res  # (N, Q)
 
     # ── Abstract Method 구현 ──
 
@@ -511,8 +573,8 @@ class AngularCombiner(BaseCombiner):
         Returns:
             np.ndarray: 최적 [beta, degree].
         """
-        # Distribution → sample dataset
-        dataset = self._distributions_to_samples(distributions)  # (N, M, n_samples)
+        # Distribution → quantile dataset
+        dataset = self._distributions_to_quantiles(distributions)  # (N, M, Q)
         base_losses = self._compute_base_losses(distributions, observed)
         self.base_losses_[h] = base_losses
 
@@ -587,12 +649,12 @@ class AngularCombiner(BaseCombiner):
         """학습된 [beta, degree]로 Distribution들을 결합.
 
         Returns:
-            np.ndarray: (N, n_samples).
+            np.ndarray: (N, Q).
         """
         params = self.fitted_params_[h]  # [beta, degree]
         beta, degree = params[0], params[1]
 
-        dataset = self._distributions_to_samples(distributions)
+        dataset = self._distributions_to_quantiles(distributions)
         base_losses = jnp.array(self.base_losses_[h])
 
         w = 1.0 / (base_losses ** beta)
@@ -602,7 +664,7 @@ class AngularCombiner(BaseCombiner):
         combined = self._angular_combine_core(
             dataset, weight, beta, degree, key,
         )
-        return np.array(combined)  # (N, n_samples)
+        return np.array(combined)  # (N, Q)
 ```
 
 ### 3.3 EqualWeightCombiner
@@ -624,7 +686,7 @@ class EqualWeightCombiner(BaseCombiner):
     학습 파라미터 없음.
 
     Example:
-        >>> combiner = EqualWeightCombiner(n_samples=1000)
+        >>> combiner = EqualWeightCombiner(n_quantiles=99)
         >>> combiner.fit(train_results, observed)  # no-op
         >>> combined = combiner.combine(test_results)
     """
@@ -643,25 +705,24 @@ class EqualWeightCombiner(BaseCombiner):
         h: int,
         distributions: List[Distribution],
     ) -> np.ndarray:
-        """동일 가중 샘플 평균.
+        """동일 가중 quantile 평균.
 
-        각 Distribution에서 n_samples만큼 뽑고 평균.
+        각 Distribution에서 동일한 quantile levels로 값을 추출하고 평균.
 
         Returns:
-            np.ndarray: (N, n_samples).
+            np.ndarray: (N, Q).
         """
         M = len(distributions)
-        samples_sum = np.zeros(
-            (len(distributions[0]), self.n_samples),
+        q_sum = np.zeros(
+            (len(distributions[0]), self.n_quantiles),
             dtype=float,
         )
 
         for dist in distributions:
-            s = dist.sample(self.n_samples, seed=self.seed)  # (N, n_samples)
-            s = np.sort(s, axis=1)
-            samples_sum += s
+            q = dist.ppf(self.quantile_levels)  # (N, Q)
+            q_sum += q
 
-        return samples_sum / M  # (N, n_samples)
+        return q_sum / M  # (N, Q)
 ```
 
 ### 3.4 `__init__.py`
@@ -689,9 +750,9 @@ __all__ = [
 
 | Method | Signature | 설명 |
 |--------|-----------|------|
-| `__init__` | `(n_samples=1000, seed=None)` | 공통 초기화 |
-| `fit` | `(results: List[BaseForecastResult], observed: np.ndarray) → Self` | Training period 파라미터 학습 |
-| `combine` | `(results: List[BaseForecastResult]) → SampleForecastResult` | Test period 결합 |
+| `__init__` | `(n_quantiles=99, seed=None)` | 공통 초기화 |
+| `fit` | `(results: List[BaseForecastResult], observed: pd.DataFrame) → Self` | Training period 파라미터 학습 |
+| `combine` | `(results: List[BaseForecastResult]) → SampleForecastResult` | Test period 결합. 입력은 고정 quantile levels, 출력은 sample (cross-quantile mixing 가능) |
 | `extract_distributions` | `(results, h: int) → List[Distribution]` | horizon별 Distribution 추출 |
 
 ### 4.2 서브클래스 Abstract Methods
@@ -699,38 +760,90 @@ __all__ = [
 | Method | Signature | 설명 |
 |--------|-----------|------|
 | `_fit_horizon` | `(h, distributions: List[Distribution], observed: np.ndarray) → Any` | horizon별 파라미터 학습 |
-| `_combine_distributions` | `(h, distributions: List[Distribution]) → np.ndarray (N, n_samples)` | 파라미터로 결합 |
+| `_combine_distributions` | `(h, distributions: List[Distribution]) → np.ndarray (N, Q)` | 파라미터로 결합 |
 
 ### 4.3 Input/Output 규약
 
 **fit() 입력:**
-- `results`: `List[BaseForecastResult]` — M개 모형, 모두 같은 `basis_index`와 `horizon`
-- `observed`: `np.ndarray` shape `(N, H)` — `observed[:, h-1]`이 horizon h의 관측값
+- `results`: `List[BaseForecastResult]` — M개 모형, 같은 `horizon`. `basis_index`는 달라도 됨 (내부에서 공통 index로 정렬)
+- `observed`: `pd.DataFrame` shape `(N_total, H)`, index가 basis times를 포함 — 공통 index에 맞춰 자동 정렬됨
 
 **combine() 입력:**
 - `results`: `List[BaseForecastResult]` — M개 모형 (fit 때와 같은 모형 수 + 순서)
 
 **combine() 출력:**
-- `SampleForecastResult` shape `(N_test, n_samples, H)`
+- `SampleForecastResult` shape `(N_common, Q, H)` — Q = n_quantiles, N_common은 모형들의 공통 basis_index 길이. cross-quantile mixing으로 원래 level 대응이 깨질 수 있으므로 sample로 취급
 
 ---
 
 ## 5. 기존 코드와의 관계
 
-### 5.1 `etc/combining/angular.py` → `src/models/combining/angular.py`
+### 5.1 `PARK/Combine/` → `src/models/combining/`
 
-| 기존 (`etc/`) | 신규 (`src/`) | 변경사항 |
-|--------------|--------------|---------|
-| `Combiner.__init__(simulated_forecast: List[DataFrame], base_forecast_loss)` | `AngularCombiner.__init__(n_samples, seed, config)` | DataFrame 대신 Distribution에서 샘플 추출 |
-| `Combiner._stack_and_sort_fc()` | `_distributions_to_samples(distributions)` | Distribution.sample() 사용 |
-| `Combiner._calculate_weight_from_loss(beta)` | `_angular_combine_core()` 내부 | 동일 로직 유지 |
-| `Combiner.combine(combine_parameter)` | `_angular_combine_core(dataset, weight, beta, degree, key)` | 순수 함수로 분리 |
-| `AngularCombine.fit()` | `_fit_horizon(h, dists, observed)` | horizon별 분리, Distribution 인터페이스 |
-| `AngularCombine._align_obs_fc()` | `BaseCombiner._validate_results()` | basis_index 검증으로 대체 |
+기존 참조 코드: `PARK/Combine/def_combine.py`
 
-### 5.2 기존 아키텍처와의 정합성
+| 기존 (`PARK/Combine/`) | 신규 (`src/models/combining/`) | 변경사항 |
+|------------------------|-------------------------------|---------|
+| `fuse_cdfs_horizontal()` | `BaseCombiner` (quantile averaging 기반) | 동일 quantile levels에서 ppf 추출 후 가중 평균 — `Q_H(u) = Σ w_i Q_i(u)` |
+| `fuse_cdfs_vertical()` | `EqualWeightCombiner._combine_distributions()` (linear pool) | `F_V(x) = Σ w_i F_i(x)` — ppf 값의 가중 평균 |
+| `fuse_pdf_angular_averaging()` | `AngularCombiner._angular_combine_core()` | θ 기반 H/V 혼합: `Q_G = (1-α)Q_H + α Q_V`, geodesic interpolation |
+| `fuse_pdf_linear_pool()` | — (필요시 LinearPoolCombiner로 확장) | 단순 PDF 가중합 |
+| `_interp_to_common_grid()` + `_safe_row_normalize()` | `dist.ppf(quantile_levels)` | PDF→CDF→quantile 보간 대신 Distribution 인터페이스의 ppf로 직접 추출 |
+| `_pdf_to_cdf()` + `np.searchsorted()` (quantile 역변환) | `dist.ppf(quantile_levels)` | CDF 수동 역변환 대신 Distribution.ppf() 사용 |
+| `tools.load_dataset()` + index intersection | `BaseCombiner._align_results()` + `BaseForecastResult.reindex()` | basis_index 교집합 추출 및 정렬 |
+| `fuse_with_recent_theta_timewise_global()` (θ 최적화) | `AngularCombiner._fit_horizon()` | grid search + L-BFGS-B 최적화, horizon별 분리 |
 
-- **ForecastResult**: 변경 없음. `to_distribution(h)` 그대로 사용
+**핵심 차이: PDF grid 기반 → Quantile function 기반**
+
+기존 `PARK/Combine/`은 PDF를 이산 grid (`x_grid`) 위에서 직접 조작:
+- PDF → CDF → quantile 역변환 → 가중 평균 → CDF → PDF (복잡한 보간 체인)
+- `_interp_to_common_grid`, `_safe_row_normalize`, `_centers_to_edges` 등 수치 안정화 필요
+
+신규 `src/models/combining/`은 Distribution 인터페이스의 `ppf()`로 직접 추출:
+- `dist.ppf(quantile_levels)` → 고정 quantile levels에서 결정론적 값 추출
+- 보간/정규화/grid 정렬 불필요, Distribution이 내부적으로 처리
+
+### 5.2 Core 변경: `BaseForecastResult.reindex()`
+
+Combining에서 futr_exog 유무에 따른 basis_index 차이를 처리하기 위해
+`BaseForecastResult`에 `reindex(idx)` 메서드를 추가한다.
+
+```python
+# src/core/forecast_results.py — BaseForecastResult에 추가
+
+def reindex(self, idx: pd.Index) -> "BaseForecastResult":
+    """주어진 index에 해당하는 행만 추출한 새 인스턴스 반환.
+
+    Args:
+        idx: 추출할 basis_index의 부분집합.
+
+    Returns:
+        동일 타입의 새 ForecastResult, basis_index = idx.
+
+    Raises:
+        KeyError: idx에 self.basis_index에 없는 값이 포함된 경우.
+
+    Example:
+        >>> common_idx = result_a.basis_index.intersection(result_b.basis_index)
+        >>> result_a_aligned = result_a.reindex(common_idx)
+    """
+    ...
+```
+
+서브클래스별 구현:
+
+| 서브클래스 | 슬라이싱 대상 |
+|-----------|-------------|
+| `ParametricForecastResult` | `params[k][mask, :]` for each k |
+| `QuantileForecastResult` | `quantiles_data[q][mask, :]` for each q |
+| `SampleForecastResult` | `samples[mask, :, :]` |
+
+구현 방식: `self.basis_index.get_indexer(idx)`로 positional indices를 구한 뒤
+내부 배열을 fancy indexing으로 슬라이싱.
+
+### 5.3 기존 아키텍처와의 정합성
+
+- **ForecastResult**: `reindex()` 메서드 추가. `to_distribution(h)` 그대로 사용
 - **Distribution**: 변경 없음. `sample()`, `ppf()` 그대로 사용
 - **Runner**: 변경 없음. Runner가 만든 ForecastResult를 Combiner에 전달
 - **BaseModel**: Combiner는 BaseModel을 상속하지 않음 (모형이 아니라 후처리기)
@@ -753,7 +866,7 @@ train_results = [arima_train, ngboost_train, chronos_train]
 test_results  = [arima_test, ngboost_test, chronos_test]
 
 # observed: np.ndarray (N_train, H)
-combiner = AngularCombiner(n_samples=1000, seed=42)
+combiner = AngularCombiner(n_quantiles=99)
 combiner.fit(train_results, observed)
 
 combined = combiner.combine(test_results)
@@ -770,12 +883,12 @@ dist_h6.ppf([0.1, 0.5, 0.9])           # (N_test, 3)
 from src.models.combining import AngularCombiner, EqualWeightCombiner
 
 # Angular combining
-angular = AngularCombiner(n_samples=1000, seed=42)
+angular = AngularCombiner(n_quantiles=99)
 angular.fit(train_results, observed)
 combined_angular = angular.combine(test_results)
 
 # Equal weight (baseline)
-equal = EqualWeightCombiner(n_samples=1000, seed=42)
+equal = EqualWeightCombiner(n_quantiles=99)
 equal.fit(train_results, observed)  # no-op
 combined_equal = equal.combine(test_results)
 ```
@@ -783,7 +896,7 @@ combined_equal = equal.combine(test_results)
 ### 6.3 특정 horizon만 확인
 
 ```python
-combiner = AngularCombiner(n_samples=1000)
+combiner = AngularCombiner(n_quantiles=99)
 combiner.fit(train_results, observed)
 combined = combiner.combine(test_results)
 
@@ -798,12 +911,21 @@ for h in [1, 24]:
 
 ## 7. Implementation Checklist
 
+### Phase 0: Core 확장 — `BaseForecastResult.reindex()`
+0. `src/core/forecast_results.py` — `BaseForecastResult`에 `reindex(idx)` 추가
+   - `BaseForecastResult.reindex()`: abstract 또는 base 구현 (get_indexer + fancy indexing)
+   - `ParametricForecastResult.reindex()`: params dict 슬라이싱
+   - `QuantileForecastResult.reindex()`: quantiles_data dict 슬라이싱
+   - `SampleForecastResult.reindex()`: samples 3D array 슬라이싱
+   - 단위 테스트: `tests/core/test_forecast_results_reindex.py`
+
 ### Phase 1: BaseCombiner + EqualWeightCombiner
 1. `src/models/combining/base.py` — BaseCombiner 구현
-   - `_validate_results()`: basis_index, horizon 검증
+   - `_validate_results()`: horizon 검증 (basis_index 일치는 검증하지 않음)
+   - `_align_results()`: 공통 basis_index 추출 + `reindex()` 호출
    - `extract_distributions()`: `to_distribution(h)` 호출
-   - `fit()`: horizon loop + `_fit_horizon()` 호출
-   - `combine()`: horizon loop + `_combine_distributions()` + `SampleForecastResult` 조립
+   - `fit()`: align → horizon loop + `_fit_horizon()` 호출
+   - `combine()`: align → horizon loop + `_combine_distributions()` + `SampleForecastResult` 조립
 2. `src/models/combining/equal_weight.py` — EqualWeightCombiner 구현
 3. `src/models/combining/__init__.py` — 공개 API export
 4. 단위 테스트: `tests/models/combining/test_base.py`
@@ -818,8 +940,8 @@ for h in [1, 24]:
    - `_fit_horizon()`: grid search + L-BFGS-B
    - `_combine_distributions()`: 학습된 파라미터로 결합
 6. 단위 테스트: `tests/models/combining/test_angular.py`
-   - 기존 `etc/combining/angular.py`와 결과 비교 검증
+   - 기존 `PARK/Combine/def_combine.py`의 `fuse_pdf_angular_averaging()`와 결과 비교 검증
 
 ### Phase 3: 통합 및 정리
-7. `etc/combining/angular.py`에 deprecation 주석 추가
+7. `PARK/Combine/def_combine.py` 대비 결과 일관성 검증
 8. CLAUDE.md Architecture 섹션 업데이트

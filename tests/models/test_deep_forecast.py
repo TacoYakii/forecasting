@@ -62,7 +62,7 @@ class TestDeepARForecaster:
         result = model.forecast(future_X=future_X, future_index=future_index)
         assert isinstance(result, ParametricForecastResult)
         assert result.params["loc"].shape == (1, PREDICTION_LENGTH)
-        assert np.all(np.isfinite(result.mean()))
+        assert np.all(np.isfinite(result.to_distribution(1).mean()))
 
     def test_quantile_loss_e2e(self, train_df, future_exog, tmp_path):
         """MQLoss → QuantileForecastResult (1, H)."""
@@ -82,7 +82,7 @@ class TestDeepARForecaster:
         assert isinstance(result, QuantileForecastResult)
         assert result.horizon == PREDICTION_LENGTH
         assert len(result.quantile_levels) > 0
-        assert np.all(np.isfinite(result.mean()))
+        assert np.all(np.isfinite(result.to_distribution(1).mean()))
 
     def test_to_distribution(self, train_df, future_exog, tmp_path):
         """to_distribution returns correct type per loss."""
@@ -128,7 +128,7 @@ class TestTFTForecaster:
         result = model.forecast(future_X=future_X, future_index=future_index)
         assert isinstance(result, QuantileForecastResult)
         assert result.horizon == PREDICTION_LENGTH
-        assert np.all(np.isfinite(result.mean()))
+        assert np.all(np.isfinite(result.to_distribution(1).mean()))
 
     def test_distribution_loss_e2e(self, train_df, future_exog, tmp_path):
         """DistributionLoss → ParametricForecastResult (1, H)."""

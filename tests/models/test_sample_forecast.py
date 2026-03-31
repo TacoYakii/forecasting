@@ -53,9 +53,10 @@ class TestChronosForecaster:
         assert result.samples.shape == (1, N_SAMPLES, PREDICTION_LENGTH)
         assert np.all(np.isfinite(result.samples))
 
-        # mean / std
-        assert result.mean().shape == (1, PREDICTION_LENGTH)
-        assert np.all(result.std() > 0)
+        # mean / std via Distribution
+        dist = result.to_distribution(1)
+        assert dist.mean().shape == (1,)
+        assert np.all(dist.std() > 0)
 
     def test_quantile_output(self, train_df, tmp_path):
         """output_type='quantiles' → QuantileForecastResult."""

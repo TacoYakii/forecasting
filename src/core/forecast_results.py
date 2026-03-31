@@ -1,5 +1,4 @@
-"""
-Forecast result containers for multi-horizon rolling forecasts.
+"""Forecast result containers for multi-horizon rolling forecasts.
 
 This module provides result classes that store forecast outputs
 assembled from multiple forecast() calls (rolling or per-horizon):
@@ -10,32 +9,40 @@ assembled from multiple forecast() calls (rolling or per-horizon):
 - SampleForecastResult: raw simulation samples
 """
 
+from abc import ABC, abstractmethod
+from typing import Dict, List, Optional, Union
+
 import numpy as np
 import pandas as pd
-from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .forecast_distribution import (
     DISTRIBUTION_REGISTRY,
     EmpiricalDistribution,
     ParametricDistribution,
-    _build_frozen,
 )
-
 
 # ---------------------------------------------------------------------------
 # Abstract base
 # ---------------------------------------------------------------------------
 
 class BaseForecastResult(ABC):
-    """
-    Abstract base for multi-horizon forecast result containers.
+    """Abstract base for multi-horizon forecast result containers.
 
     Subclasses store the actual forecast data (params, quantiles, or samples)
-    and implement to_distribution() and to_dataframe().
+    and implement to_distribution().
+
+    Marginal statistics (mean, std, quantile, interval) are accessed through
+    Distribution objects via ``to_distribution(h)``.
 
     Attributes:
         basis_index (pd.Index): Time index for each forecast origin (length N).
+
+    Examples:
+        >>> result = runner.forecast()
+        >>> dist = result.to_distribution(h=1)
+        >>> dist.mean()       # (N,)
+        >>> dist.ppf(0.9)     # (N,)
+        >>> dist.interval()   # (lower, upper)
     """
 
     def __init__(self, basis_index: pd.Index):
@@ -55,20 +62,40 @@ class BaseForecastResult(ABC):
         """Extract a distribution object for a specific forecast horizon h (1-indexed)."""
         ...
 
-    @abstractmethod
     def to_dataframe(self, h: Optional[int] = None) -> pd.DataFrame:
-        """Convert to a pandas DataFrame."""
-        ...
+        """Convert to a pandas DataFrame with mu and std columns.
 
-    @abstractmethod
-    def mean(self) -> np.ndarray:
-        """Forecast mean, shape (N, H)."""
-        ...
+        Args:
+            h: If specified, return only that horizon via to_distribution(h).
+               If None, return all horizons with MultiIndex columns.
 
-    @abstractmethod
-    def std(self) -> np.ndarray:
-        """Forecast std, shape (N, H)."""
-        ...
+        Returns:
+            pd.DataFrame indexed by basis_index.
+
+        Examples:
+            >>> result.to_dataframe(h=1)   # single horizon
+            >>> result.to_dataframe()      # all horizons
+        """
+        if h is not None:
+            self._validate_h(h)
+            return self.to_distribution(h).to_dataframe()
+
+        H = self.horizon
+        dfs_mu = []
+        dfs_std = []
+        for hi in range(1, H + 1):
+            dist = self.to_distribution(hi)
+            dfs_mu.append(dist.mean())
+            dfs_std.append(dist.std())
+
+        mu = np.column_stack(dfs_mu)
+        sigma = np.column_stack(dfs_std)
+        columns = pd.MultiIndex.from_product(
+            [["mu", "std"], list(range(1, H + 1))],
+            names=["metric", "horizon"],
+        )
+        data = np.concatenate([mu, sigma], axis=1)
+        return pd.DataFrame(data, index=self.basis_index, columns=columns)
 
     def __len__(self) -> int:
         return len(self.basis_index)
@@ -83,8 +110,7 @@ class BaseForecastResult(ABC):
 # ---------------------------------------------------------------------------
 
 class ParametricForecastResult(BaseForecastResult):
-    """
-    Multi-horizon rolling forecast output stored as native distribution parameters.
+    """Multi-horizon rolling forecast output stored as native distribution parameters.
 
     Stores dist_name and a params dict where each value has shape (N_basis, H).
     The params keys match the DISTRIBUTION_REGISTRY factory argument names
@@ -151,8 +177,7 @@ class ParametricForecastResult(BaseForecastResult):
         )
 
     def to_distribution(self, h: int) -> ParametricDistribution:
-        """
-        Extract a ParametricDistribution for a specific forecast horizon.
+        """Extract a ParametricDistribution for a specific forecast horizon.
 
         Args:
             h: Forecast horizon (1-indexed).
@@ -169,54 +194,13 @@ class ParametricForecastResult(BaseForecastResult):
             index=self.basis_index,
         )
 
-    def mean(self) -> np.ndarray:
-        """Forecast mean, shape (N, H). Computed from the parametric distribution."""
-        frozen = _build_frozen(self.dist_name, self.params)
-        return frozen.mean()
-
-    def std(self) -> np.ndarray:
-        """Forecast std, shape (N, H). Computed from the parametric distribution."""
-        frozen = _build_frozen(self.dist_name, self.params)
-        return frozen.std()
-
-    def to_dataframe(self, h: Optional[int] = None) -> pd.DataFrame:
-        """
-        Convert to a pandas DataFrame.
-
-        Args:
-            h: If specified, return only that horizon's (mu, std).
-               If None, return all horizons with MultiIndex columns.
-
-        Returns:
-            pd.DataFrame indexed by basis_index.
-        """
-        mu = self.mean()
-        sigma = self.std()
-
-        if h is not None:
-            self._validate_h(h)
-            idx = h - 1
-            return pd.DataFrame(
-                {"mu": mu[:, idx], "std": sigma[:, idx]},
-                index=self.basis_index,
-            )
-
-        H = self.horizon
-        columns = pd.MultiIndex.from_product(
-            [["mu", "std"], list(range(1, H + 1))],
-            names=["metric", "horizon"],
-        )
-        data = np.concatenate([mu, sigma], axis=1)
-        return pd.DataFrame(data, index=self.basis_index, columns=columns)
-
 
 # ---------------------------------------------------------------------------
 # QuantileForecastResult
 # ---------------------------------------------------------------------------
 
 class QuantileForecastResult(BaseForecastResult):
-    """
-    Quantile-based multi-horizon forecast output.
+    """Quantile-based multi-horizon forecast output.
 
     Stores pre-computed quantile predictions without assuming any
     parametric distribution family.
@@ -227,10 +211,10 @@ class QuantileForecastResult(BaseForecastResult):
         basis_index (pd.Index): Time index for each basis time (length N).
 
     Examples:
-        >>> result.quantile(0.9, h=6)        # 90th percentile at 6-step-ahead
-        >>> result.interval(h=6)             # (lower, upper) at 90% coverage
-        >>> result.to_distribution(1)        # 1-step-ahead EmpiricalDistribution
-        >>> result.quantile_levels           # [0.05, 0.1, 0.5, 0.9, 0.95]
+        >>> dist = result.to_distribution(1)   # 1-step-ahead EmpiricalDistribution
+        >>> dist.ppf(0.9)                      # 90th percentile
+        >>> dist.interval(coverage=0.9)        # (lower, upper) at 90% coverage
+        >>> result.quantile_levels             # [0.05, 0.1, 0.5, 0.9, 0.95]
     """
 
     def __init__(
@@ -287,33 +271,8 @@ class QuantileForecastResult(BaseForecastResult):
         """Raw quantile data, mapping quantile level -> array (N_basis, H)."""
         return dict(self._quantiles_data)
 
-    def mean(self) -> np.ndarray:
-        """Approximate mean from median (0.5) or mean of all quantiles."""
-        if 0.5 in self._quantiles_data:
-            return self._quantiles_data[0.5]
-        return np.mean(
-            np.stack(list(self._quantiles_data.values()), axis=0), axis=0
-        )
-
-    def std(self) -> np.ndarray:
-        """Approximate std from IQR or outermost quantile pair."""
-        q_levels = sorted(self._quantiles_data.keys())
-        if 0.25 in self._quantiles_data and 0.75 in self._quantiles_data:
-            iqr = self._quantiles_data[0.75] - self._quantiles_data[0.25]
-            return np.maximum(iqr / 1.349, 1e-9)
-        elif len(q_levels) >= 2:
-            q_lo, q_hi = q_levels[0], q_levels[-1]
-            span = self._quantiles_data[q_hi] - self._quantiles_data[q_lo]
-            from scipy.stats import norm
-            z_span = norm.ppf(q_hi) - norm.ppf(q_lo)
-            return np.maximum(span / max(z_span, 1e-9), 1e-9)
-        else:
-            first = next(iter(self._quantiles_data.values()))
-            return np.ones_like(first) * 1e-9
-
     def to_distribution(self, h: int) -> EmpiricalDistribution:
-        """
-        Extract an EmpiricalDistribution for a specific forecast horizon.
+        """Extract an EmpiricalDistribution for a specific forecast horizon.
 
         Args:
             h: Forecast horizon (1-indexed).
@@ -333,106 +292,22 @@ class QuantileForecastResult(BaseForecastResult):
             quantile_values=values,
         )
 
-    def quantile(self, q: Union[float, List[float]], h: int) -> np.ndarray:
-        """
-        Quantile value at a specific forecast horizon.
-
-        If the requested quantile level is stored, returns it directly.
-        Otherwise interpolates between the nearest available levels.
-
-        Args:
-            q: Quantile level(s) in [0, 1]. Scalar or list.
-            h: Forecast horizon (1-indexed).
-
-        Returns:
-            np.ndarray: shape (N_basis,) if q is scalar,
-                        shape (N_basis, len(q)) if q is a list.
-        """
-        self._validate_h(h)
-        h_idx = h - 1
-        scalar = isinstance(q, (int, float))
-        q_list = [q] if scalar else list(q)
-
-        results = []
-        q_levels = self.quantile_levels
-        q_values = np.stack(
-            [self._quantiles_data[ql][:, h_idx] for ql in q_levels], axis=1
-        )  # (N_basis, n_quantiles)
-
-        for qi in q_list:
-            if qi in self._quantiles_data:
-                results.append(self._quantiles_data[qi][:, h_idx])
-            else:
-                results.append(
-                    np.array([
-                        np.interp(qi, q_levels, q_values[i])
-                        for i in range(q_values.shape[0])
-                    ])
-                )
-
-        if scalar:
-            return results[0]
-        return np.stack(results, axis=1)
-
-    def interval(
-        self, h: int, coverage: float = 0.9
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Prediction interval at a specific horizon.
-
-        Args:
-            h: Forecast horizon (1-indexed).
-            coverage: Interval coverage probability (default 0.9 -> 5th-95th).
-
-        Returns:
-            Tuple of (lower, upper), each shape (N_basis,).
-        """
-        alpha = (1.0 - coverage) / 2.0
-        lower = self.quantile(alpha, h)
-        upper = self.quantile(1.0 - alpha, h)
-        return lower, upper
-
-    def to_dataframe(self, h: Optional[int] = None) -> pd.DataFrame:
-        """
-        Convert to a pandas DataFrame with mu and std columns.
-
-        Args:
-            h: If specified, return only that horizon.
-               If None, return all horizons with MultiIndex columns.
-        """
-        mu = self.mean()
-        sigma = self.std()
-
-        if h is not None:
-            self._validate_h(h)
-            idx = h - 1
-            return pd.DataFrame(
-                {"mu": mu[:, idx], "std": sigma[:, idx]},
-                index=self.basis_index,
-            )
-
-        H = self.horizon
-        columns = pd.MultiIndex.from_product(
-            [["mu", "std"], list(range(1, H + 1))],
-            names=["metric", "horizon"],
-        )
-        data = np.concatenate([mu, sigma], axis=1)
-        return pd.DataFrame(data, index=self.basis_index, columns=columns)
-
 
 # ---------------------------------------------------------------------------
 # SampleForecastResult
 # ---------------------------------------------------------------------------
 
 class SampleForecastResult(BaseForecastResult):
-    """
-    Sample-based multi-horizon forecast output.
+    """Sample-based multi-horizon forecast output.
 
     Stores raw simulation samples of shape (N_basis, n_samples, H).
 
     This class unifies outputs from:
     - ARIMA/SARIMA ``simulate_paths`` (stochastic path simulation)
     - Foundation models that produce sample-based predictions
+
+    Marginal statistics are accessed via ``to_distribution(h)``.
+    Joint (cross-horizon) structure is accessed via ``path()`` and ``samples``.
 
     Attributes:
         samples (np.ndarray): Raw samples, shape (N_basis, n_samples, H).
@@ -441,9 +316,9 @@ class SampleForecastResult(BaseForecastResult):
     Examples:
         >>> result = model.simulate_paths(n_paths=1000, horizon=24)
         >>> result.samples.shape         # (1, 1000, 24)
-        >>> result.quantile(0.9, h=6)    # 90th percentile at 6-step-ahead
-        >>> result.to_distribution(1)    # 1-step-ahead EmpiricalDistribution
         >>> result.path(0)               # all sample paths from first basis time
+        >>> dist = result.to_distribution(6)
+        >>> dist.ppf(0.9)                # 90th percentile at 6-step-ahead
     """
 
     def __init__(
@@ -484,17 +359,8 @@ class SampleForecastResult(BaseForecastResult):
         """Number of samples per (basis_time, horizon) pair."""
         return self._samples.shape[1]
 
-    def mean(self) -> np.ndarray:
-        """Sample mean, shape (N, H)."""
-        return self._samples.mean(axis=1)
-
-    def std(self) -> np.ndarray:
-        """Sample std, shape (N, H)."""
-        return self._samples.std(axis=1)
-
     def to_distribution(self, h: int) -> EmpiricalDistribution:
-        """
-        Extract an EmpiricalDistribution for a specific forecast horizon.
+        """Extract an EmpiricalDistribution for a specific forecast horizon.
 
         Args:
             h: Forecast horizon (1-indexed).
@@ -509,24 +375,11 @@ class SampleForecastResult(BaseForecastResult):
             samples=samples_h,
         )
 
-    def quantile(self, q: Union[float, List[float]], h: int) -> np.ndarray:
-        """
-        Empirical quantile at a specific forecast horizon.
-
-        Args:
-            q: Quantile level(s) in [0, 1]. Scalar or list.
-            h: Forecast horizon (1-indexed).
-
-        Returns:
-            np.ndarray: shape (N_basis,) if q is scalar,
-                        shape (N_basis, len(q)) if q is a list.
-        """
-        self._validate_h(h)
-        return np.quantile(self._samples[:, :, h - 1], q, axis=1).T
-
     def path(self, basis_idx: int) -> np.ndarray:
-        """
-        All sample paths from a single basis time.
+        """All sample paths from a single basis time.
+
+        Provides access to the joint (cross-horizon) distribution structure
+        that is lost when extracting a single-horizon Distribution.
 
         Args:
             basis_idx: Integer index into basis_index (0-indexed).
@@ -535,48 +388,3 @@ class SampleForecastResult(BaseForecastResult):
             np.ndarray: shape (n_samples, H).
         """
         return self._samples[basis_idx]
-
-    def interval(
-        self, h: int, coverage: float = 0.9
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Empirical prediction interval at a specific horizon.
-
-        Args:
-            h: Forecast horizon (1-indexed).
-            coverage: Interval coverage probability (default 0.9 -> 5th-95th).
-
-        Returns:
-            Tuple of (lower, upper), each shape (N_basis,).
-        """
-        alpha = (1.0 - coverage) / 2.0
-        lower = self.quantile(alpha, h).squeeze()
-        upper = self.quantile(1.0 - alpha, h).squeeze()
-        return lower, upper
-
-    def to_dataframe(self, h: Optional[int] = None) -> pd.DataFrame:
-        """
-        Convert to a pandas DataFrame with mu and std columns.
-
-        Args:
-            h: If specified, return only that horizon.
-               If None, return all horizons with MultiIndex columns.
-        """
-        mu = self.mean()
-        sigma = self.std()
-
-        if h is not None:
-            self._validate_h(h)
-            idx = h - 1
-            return pd.DataFrame(
-                {"mu": mu[:, idx], "std": sigma[:, idx]},
-                index=self.basis_index,
-            )
-
-        H = self.horizon
-        columns = pd.MultiIndex.from_product(
-            [["mu", "std"], list(range(1, H + 1))],
-            names=["metric", "horizon"],
-        )
-        data = np.concatenate([mu, sigma], axis=1)
-        return pd.DataFrame(data, index=self.basis_index, columns=columns)

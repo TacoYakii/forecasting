@@ -58,10 +58,11 @@ class TestDeterministicForecasters:
         assert result.params["scale"].shape == (T, 1)
         assert len(result.basis_index) == T
 
-        # Values are finite
-        assert np.all(np.isfinite(result.mean()))
-        assert np.all(np.isfinite(result.std()))
-        assert np.all(result.std() > 0)
+        # Values are finite (check via Distribution)
+        dist = result.to_distribution(1)
+        assert np.all(np.isfinite(dist.mean()))
+        assert np.all(np.isfinite(dist.std()))
+        assert np.all(dist.std() > 0)
 
     def test_to_distribution(self, train_df, forecast_df, tmp_path):
         """to_distribution(h=1) returns a usable ParametricDistribution."""
@@ -131,7 +132,7 @@ class TestNativeProbabilisticForecasters:
         T = len(forecast_df)
         for v in result.params.values():
             assert v.shape == (T, 1)
-        assert np.all(np.isfinite(result.mean()))
+        assert np.all(np.isfinite(result.to_distribution(1).mean()))
 
 
 # ======================================================================

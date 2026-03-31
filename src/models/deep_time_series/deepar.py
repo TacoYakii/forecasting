@@ -49,7 +49,7 @@ class DeepARForecaster(BaseDeepModel):
         ... )
         >>> model.fit()
         >>> result = model.predict()
-        >>> result.quantile(0.9, h=6)
+        >>> result.to_distribution(6).ppf(0.9)
     """
 
     def _create_model(self) -> DeepAR:

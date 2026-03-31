@@ -1,5 +1,4 @@
-"""
-ParametricDistribution: Vectorized parametric probability distribution.
+"""ParametricDistribution: Vectorized parametric probability distribution.
 
 This module provides the ParametricDistribution class, which wraps a
 parametric distribution family (e.g. Normal, Student-t, Gamma) with
@@ -13,11 +12,11 @@ Key features:
 - to_dataframe() for downstream compatibility (columns: mu, std)
 """
 
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
 import numpy as np
 import pandas as pd
 from scipy import stats
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
 
 # ---------------------------------------------------------------------------
 # Distribution registry
@@ -80,8 +79,7 @@ DISTRIBUTION_REGISTRY: Dict[str, Dict[str, Any]] = {
 
 
 def _build_frozen(dist_name: str, params: Dict[str, np.ndarray]):
-    """
-    Build a frozen scipy distribution from registry entry and params.
+    """Build a frozen scipy distribution from registry entry and params.
 
     Applies safety clamps from the registry, then constructs the
     scipy frozen distribution with the appropriate keyword arguments.
@@ -108,8 +106,7 @@ def _build_frozen(dist_name: str, params: Dict[str, np.ndarray]):
 # ---------------------------------------------------------------------------
 
 class ParametricDistribution:
-    """
-    Vectorized probabilistic forecast distribution over a time index.
+    """Vectorized probabilistic forecast distribution over a time index.
 
     Stores distribution name and parameter arrays (one value per time step T).
     Provides unified PPF, sampling, CDF, and DataFrame conversion operations.
@@ -181,8 +178,7 @@ class ParametricDistribution:
     # ------------------------------------------------------------------
 
     def _frozen_dist(self, start: int = 0, end: Optional[int] = None):
-        """
-        Build a frozen scipy distribution for the slice [start:end].
+        """Build a frozen scipy distribution for the slice [start:end].
 
         Returns a frozen scipy.stats distribution with vectorized parameters.
         """
@@ -192,8 +188,7 @@ class ParametricDistribution:
         return _build_frozen(self.dist_name, chunk_params)
 
     def _apply_chunked(self, func: Callable, *args: Any) -> np.ndarray:
-        """
-        Apply func(frozen_dist, *args) in chunks along the time dimension.
+        """Apply func(frozen_dist, *args) in chunks along the time dimension.
 
         If chunk_size is None, processes all at once.
         Results are concatenated along axis=0.
@@ -215,8 +210,7 @@ class ParametricDistribution:
 
     @staticmethod
     def _ppf_2d(frozen, u_chunk: np.ndarray) -> np.ndarray:
-        """
-        Apply ppf to a 2D uniform array column-by-column.
+        """Apply ppf to a 2D uniform array column-by-column.
 
         scipy frozen distributions with array parameters support ppf(1-D array)
         returning an array of the same shape. We iterate over the n columns of
@@ -237,8 +231,7 @@ class ParametricDistribution:
     # ------------------------------------------------------------------
 
     def ppf(self, q: Union[float, List[float], np.ndarray]) -> np.ndarray:
-        """
-        Percent Point Function (inverse CDF / quantile function).
+        """Percent Point Function (inverse CDF / quantile function).
 
         Args:
             q: Probability value(s) in [0, 1].
@@ -272,8 +265,7 @@ class ParametricDistribution:
             return self._apply_chunked(_ppf_vector, q_arr)
 
     def sample(self, n: int = 1000, seed: Optional[int] = None) -> np.ndarray:
-        """
-        Generate samples via Inverse Transform Sampling.
+        """Generate samples via Inverse Transform Sampling.
 
         Draws uniform random variates U ~ Uniform(0, 1) and applies ppf(U),
         which is equivalent to direct sampling but ensures reproducibility
@@ -307,8 +299,7 @@ class ParametricDistribution:
         return np.concatenate(results, axis=0)
 
     def cdf(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """
-        Cumulative Distribution Function.
+        """Cumulative Distribution Function.
 
         Args:
             x: Value(s) at which to evaluate CDF.
@@ -326,8 +317,7 @@ class ParametricDistribution:
         return self._apply_chunked(_cdf, x_arr)
 
     def pdf(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """
-        Probability Density Function (or PMF for discrete distributions).
+        """Probability Density Function (or PMF for discrete distributions).
 
         Args:
             x: Value(s) at which to evaluate PDF.
@@ -345,8 +335,7 @@ class ParametricDistribution:
         return self._apply_chunked(_pdf, x_arr)
 
     def mean(self) -> np.ndarray:
-        """
-        Distribution mean for each time step.
+        """Distribution mean for each time step.
 
         Returns:
             np.ndarray of shape (T,)
@@ -357,8 +346,7 @@ class ParametricDistribution:
         return self._apply_chunked(_mean)
 
     def std(self) -> np.ndarray:
-        """
-        Distribution standard deviation for each time step.
+        """Distribution standard deviation for each time step.
 
         Returns:
             np.ndarray of shape (T,)
@@ -368,9 +356,26 @@ class ParametricDistribution:
 
         return self._apply_chunked(_std)
 
-    def to_dataframe(self) -> pd.DataFrame:
+    def interval(
+        self, coverage: float = 0.9
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Prediction interval based on the parametric distribution.
+
+        Args:
+            coverage: Interval coverage probability (default 0.9 -> 5th-95th).
+
+        Returns:
+            Tuple of (lower, upper), each shape (T,).
+
+        Examples:
+            >>> lower, upper = dist.interval(coverage=0.9)
+            >>> lower.shape  # (T,)
         """
-        Convert to a pandas DataFrame with columns: mu, std (and optionally basis_time).
+        alpha = (1.0 - coverage) / 2.0
+        return self.ppf(alpha), self.ppf(1.0 - alpha)
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Convert to a pandas DataFrame with columns: mu, std (and optionally basis_time).
 
         The mu and std columns represent the distribution mean and standard deviation
         for each time step, computed from the stored distribution parameters.
@@ -397,8 +402,7 @@ class ParametricDistribution:
         return pd.DataFrame(data, index=self.index)
 
     def get_dist_info(self) -> Dict[str, Any]:
-        """
-        Return a serializable summary of the distribution.
+        """Return a serializable summary of the distribution.
 
         Returns:
             Dict with keys: dist_name, param_names, T
@@ -414,8 +418,7 @@ class ParametricDistribution:
 # ---------------------------------------------------------------------------
 
 class EmpiricalDistribution:
-    """
-    Non-parametric distribution backed by sorted samples.
+    """Non-parametric distribution backed by sorted samples.
 
     Provides the same public API as ParametricDistribution (ppf, cdf, pdf,
     sample, mean, std, to_dataframe) but without assuming any parametric
@@ -424,8 +427,8 @@ class EmpiricalDistribution:
     Can be constructed from:
     - **Raw samples**: pass ``samples`` of shape (T, n_samples).
     - **Quantile levels + values**: pass ``quantile_levels`` of shape (Q,) and
-      ``quantile_values`` of shape (T, Q).  A pseudo-sample of 1000 points
-      per time step is generated via linear interpolation.
+      ``quantile_values`` of shape (T, Q).  Quantile values are used directly
+      as sorted samples (no interpolation).
 
     Tail behaviour (quantile mode): requests outside the outermost stored
     quantile levels are clamped to the outermost values (flat extrapolation).
@@ -450,8 +453,6 @@ class EmpiricalDistribution:
         ...     quantile_values=qvals,   # (T, 3)
         ... )
     """
-
-    _N_SYNTHETIC: int = 1000  # pseudo-sample size when built from quantiles
 
     def __init__(
         self,
@@ -499,32 +500,10 @@ class EmpiricalDistribution:
                     f"quantile_values rows ({quantile_values.shape[0]}) "
                     f"!= index length ({len(index)})"
                 )
-            self._sorted = self._quantiles_to_samples(
-                quantile_levels, quantile_values
-            )
+            self._sorted = np.sort(quantile_values, axis=1)
 
         self.index = index
         self.base_idx = base_idx
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def _quantiles_to_samples(
-        cls,
-        levels: np.ndarray,
-        values: np.ndarray,
-    ) -> np.ndarray:
-        """Interpolate quantile pairs into a sorted pseudo-sample (T, N_SYNTHETIC)."""
-        T = values.shape[0]
-        n = cls._N_SYNTHETIC
-        # uniform grid over [0, 1], clamped to outermost levels
-        u = np.linspace(levels[0], levels[-1], n)
-        result = np.empty((T, n), dtype=float)
-        for i in range(T):
-            result[i] = np.interp(u, levels, values[i])
-        return result
 
     # ------------------------------------------------------------------
     # Public API (mirrors ParametricDistribution)
@@ -540,8 +519,7 @@ class EmpiricalDistribution:
         )
 
     def ppf(self, q: Union[float, List[float], np.ndarray]) -> np.ndarray:
-        """
-        Empirical quantile function.
+        """Empirical quantile function.
 
         Args:
             q: Probability value(s) in [0, 1].
@@ -560,8 +538,7 @@ class EmpiricalDistribution:
         return result.T  # (T, Q)
 
     def cdf(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """
-        Empirical CDF.
+        """Empirical CDF.
 
         Args:
             x: Value(s) at which to evaluate. Scalar or array of shape (T,).
@@ -581,8 +558,7 @@ class EmpiricalDistribution:
         return counts / n
 
     def pdf(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """
-        Approximate PDF via finite-difference on the empirical CDF.
+        """Approximate PDF via finite-difference on the empirical CDF.
 
         Uses Silverman's rule-of-thumb bandwidth: h = 1.06 * std * n^{-1/5}.
 
@@ -600,8 +576,7 @@ class EmpiricalDistribution:
         )
 
     def sample(self, n: int = 1000, seed: Optional[int] = None) -> np.ndarray:
-        """
-        Resample with replacement.
+        """Resample with replacement.
 
         Args:
             n: Number of samples per time step.
@@ -623,9 +598,26 @@ class EmpiricalDistribution:
         """Sample std, shape (T,)."""
         return self._sorted.std(axis=1)
 
-    def to_dataframe(self) -> pd.DataFrame:
+    def interval(
+        self, coverage: float = 0.9
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Prediction interval based on the empirical distribution.
+
+        Args:
+            coverage: Interval coverage probability (default 0.9 -> 5th-95th).
+
+        Returns:
+            Tuple of (lower, upper), each shape (T,).
+
+        Examples:
+            >>> lower, upper = dist.interval(coverage=0.9)
+            >>> lower.shape  # (T,)
         """
-        Convert to DataFrame with columns: mu, std (and optionally basis_time).
+        alpha = (1.0 - coverage) / 2.0
+        return self.ppf(alpha), self.ppf(1.0 - alpha)
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Convert to DataFrame with columns: mu, std (and optionally basis_time).
         """
         data: Dict[str, Any] = {"mu": self.mean(), "std": self.std()}
         if self.base_idx is not None:

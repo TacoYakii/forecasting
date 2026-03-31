@@ -1,5 +1,4 @@
-"""
-BaseFoundationModel: Base class for pretrained foundation forecasting models.
+"""BaseFoundationModel: Base class for pretrained foundation forecasting models.
 
 This module provides BaseFoundationModel, which extends BaseForecaster to
 support pretrained time series foundation models (Chronos, Moirai, etc.)
@@ -19,16 +18,15 @@ Key responsibilities:
 - Model save/load (weights or pipeline serialization)
 """
 
+from abc import abstractmethod
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Self, Union
+
 import numpy as np
 import pandas as pd
 
-from pathlib import Path
-from typing import Union, Optional, Dict, List, Any, Iterable, Self
-from abc import abstractmethod
-
 from src.core.base_model import BaseForecaster
-from src.core.forecast_results import SampleForecastResult, QuantileForecastResult
-
+from src.core.forecast_results import QuantileForecastResult, SampleForecastResult
 
 # Default hyperparameters for foundation models.
 _DEFAULT_FOUNDATION_HP = {
@@ -53,8 +51,7 @@ def _resolve_device(device: str) -> str:
 
 
 class BaseFoundationModel(BaseForecaster):
-    """
-    Base class for pretrained foundation time series forecasting models.
+    """Base class for pretrained foundation time series forecasting models.
 
     Extends BaseForecaster to support models loaded via from_pretrained()
     (e.g., Chronos, TimesFM, Moirai, Lag-Llama) while producing
@@ -99,7 +96,7 @@ class BaseFoundationModel(BaseForecaster):
         ... )
         >>> model.fit()                      # loads pretrained weights
         >>> result = model.forecast()        # → SampleForecastResult
-        >>> result.quantile(0.9, h=6)        # 90th percentile at 6-step-ahead
+        >>> result.to_distribution(6).ppf(0.9)  # 90th percentile at 6-step-ahead
     """
 
     def __init__(
@@ -179,8 +176,7 @@ class BaseFoundationModel(BaseForecaster):
     # ------------------------------------------------------------------
 
     def fit(self) -> Self:
-        """
-        Load pretrained model and optionally fine-tune.
+        """Load pretrained model and optionally fine-tune.
 
         Steps:
             1. Call _load_pretrained() to load weights/pipeline
@@ -215,8 +211,7 @@ class BaseFoundationModel(BaseForecaster):
     # ------------------------------------------------------------------
 
     def forecast(self) -> Union[SampleForecastResult, QuantileForecastResult]:
-        """
-        Generate probabilistic forecast using the full dataset as context.
+        """Generate probabilistic forecast using the full dataset as context.
 
         Uses the entire training dataset as context for a single-shot prediction
         of prediction_length steps ahead.
@@ -290,8 +285,7 @@ class BaseFoundationModel(BaseForecaster):
         samples: np.ndarray,
         basis_index: pd.Index,
     ) -> QuantileForecastResult:
-        """
-        Convert sample array to QuantileForecastResult.
+        """Convert sample array to QuantileForecastResult.
 
         Computes quantiles from the sample distribution at each confidence level.
 
@@ -323,8 +317,7 @@ class BaseFoundationModel(BaseForecaster):
     # ------------------------------------------------------------------
 
     def _save_model_specific(self, model_path: Path) -> Path:
-        """
-        Save foundation model state.
+        """Save foundation model state.
 
         Default implementation saves the model_name_or_path reference.
         Subclasses can override to save fine-tuned weights.
@@ -353,8 +346,7 @@ class BaseFoundationModel(BaseForecaster):
         return sv_path
 
     def _load_model_specific(self, model_path: Path) -> None:
-        """
-        Load foundation model state.
+        """Load foundation model state.
 
         Default implementation reads the config and re-loads pretrained model.
         Subclasses can override to load fine-tuned weights.
@@ -386,8 +378,7 @@ class BaseFoundationModel(BaseForecaster):
 
     @abstractmethod
     def _load_pretrained(self) -> None:
-        """
-        Load the pretrained model/pipeline.
+        """Load the pretrained model/pipeline.
 
         Must set self._pipeline to the loaded model object.
         Use self._model_name_or_path for the model identifier and
@@ -409,8 +400,7 @@ class BaseFoundationModel(BaseForecaster):
         prediction_length: int,
         context_X: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        """
-        Generate forecast samples from the pretrained model.
+        """Generate forecast samples from the pretrained model.
 
         Args:
             context_y: Context target values, shape (context_length,).
@@ -440,8 +430,7 @@ class BaseFoundationModel(BaseForecaster):
         pass
 
     def _fine_tune_model(self) -> None:
-        """
-        Fine-tune the pretrained model on training data.
+        """Fine-tune the pretrained model on training data.
 
         Default implementation raises NotImplementedError.
         Override in subclasses that support fine-tuning.

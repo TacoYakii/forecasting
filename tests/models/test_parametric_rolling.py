@@ -103,8 +103,9 @@ class TestGarchForecasters:
         assert isinstance(result, ParametricForecastResult)
         assert result.params["loc"].shape == (1, HORIZON)
         assert result.params["scale"].shape == (1, HORIZON)
-        assert np.all(np.isfinite(result.mean()))
-        assert np.all(result.std() > 0)
+        dist = result.to_distribution(1)
+        assert np.all(np.isfinite(dist.mean()))
+        assert np.all(dist.std() > 0)
 
     def test_to_distribution(self, train_df, tmp_path):
         """to_distribution(h) returns ParametricDistribution."""
@@ -127,7 +128,7 @@ class TestGarchForecasters:
         # Should still produce valid forecast after state update
         result = model.forecast(horizon=HORIZON)
         assert isinstance(result, ParametricForecastResult)
-        assert np.all(np.isfinite(result.mean()))
+        assert np.all(np.isfinite(result.to_distribution(1).mean()))
 
     def test_student_t_distribution(self, train_df, tmp_path):
         """Student-t distribution produces 3-param result (loc, scale, df)."""
@@ -170,8 +171,9 @@ class TestSimulatePaths:
         assert result.samples.shape == (1, n_paths, HORIZON)
         assert np.all(np.isfinite(result.samples))
 
-        # Quantile extraction
-        q90 = result.quantile(0.9, h=1)
+        # Quantile extraction via Distribution
+        dist = result.to_distribution(1)
+        q90 = dist.ppf(0.9)
         assert q90.shape == (1,)
         assert np.isfinite(q90[0])
 
@@ -210,7 +212,7 @@ class TestRollingRunner:
         N = len(full_df.loc[FORECAST_START:FORECAST_END])
         assert result.params["loc"].shape[0] == N
         assert result.params["loc"].shape[1] == HORIZON
-        assert np.all(np.isfinite(result.mean()))
+        assert np.all(np.isfinite(result.to_distribution(1).mean()))
 
     def test_rolling_simulate_paths(self, full_df, tmp_path):
         """Rolling simulate_paths → stacked SampleForecastResult (N, n_paths, H)."""
