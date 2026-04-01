@@ -27,6 +27,15 @@ package.json
 .env
 .env.*
 
+# Credentials / keys
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+credentials*
+service-account*.json
+
 # Other
 PARK/
 nMAPE_test/

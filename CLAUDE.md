@@ -27,7 +27,7 @@ Python 3.13 based probabilistic wind power forecasting system.
 
 ## Development Setup
 
-- **Python interpreter:** `.venv/bin/python` (absolute: `.venv/bin/python`)
+- **Python interpreter:** `.venv/bin/python`
 - Run commands via `.venv/bin/python -m <module>` (e.g., `.venv/bin/python -m pytest`)
 
 ```bash
