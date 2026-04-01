@@ -23,6 +23,10 @@ package.json
 .kilocode/
 .vscode/
 
+# Secrets
+.env
+.env.*
+
 # Other
 PARK/
 nMAPE_test/
@@ -34,4 +38,3 @@ lightning_logs/
 *.csv
 
 /etc/
-data

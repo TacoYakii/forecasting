@@ -1,5 +1,6 @@
 import requests
 import json
+import os
 import time
 import pandas as pd
 from pathlib import Path
@@ -89,8 +90,8 @@ class KMARetriever:
         self.state_file = self.info_sv_dir / "kma_download_progress.json"
         
         self.api_url = "https://apihub.kma.go.kr/api/typ06/url/um_grib_pt_tmef.php"
-        primary_key = "***REMOVED***"
-        secondary_key = "***REMOVED***"
+        primary_key = os.getenv("KMA_PRIMARY_KEY")
+        secondary_key = os.getenv("KMA_SECONDARY_KEY")
         
         if not primary_key:
             raise ValueError(
@@ -361,17 +362,19 @@ if __name__ == "__main__":
     location = "dongbok"
     mode = "GDAPS"
     
-    with open("data/meta/request/request_time_range.json", "r") as f: 
+    PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+    with open(PROJECT_ROOT / "data" / "meta" / "request" / "request_time_range.json", "r") as f:
         request_time_range = json.load(f)
 
-    with open("data/meta/request/group_information.json", "r") as f: 
+    with open(PROJECT_ROOT / "data" / "meta" / "request" / "group_information.json", "r") as f:
         group_information = json.load(f)
         
     date_range = pd.date_range(request_time_range[location][0], request_time_range[location][1], freq="6h")
 
     for group, info in group_information[mode][location].items():
         retriever = KMARetriever(
-            sv_dir=f"data/original/{location}/{mode}/{group}",
+            sv_dir=str(PROJECT_ROOT / "data" / "original" / location / mode / group),
             lat=info["coordinate"][0],  
             lon=info["coordinate"][1], 
             date_range=date_range,

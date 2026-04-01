@@ -242,12 +242,13 @@ class ECMWFRetriever:
 SFC_LEVEL_PARAMS = "59.128/134.128/151.128/164.128/165.128/166.128/167.128/228.128/235.128/168.128/146.128/176.128/177.128"
 PRESSURE_LEVEL_PARAMS = "129.128/130.128/131/132/133.128"
 WSPD_PARAMS = "165.128/166.128/239.228/240.228/246.228/247.228" 
-metadata_root = Path("data/meta")
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+metadata_root = PROJECT_ROOT / "data" / "meta"
 
 
 if __name__ == "__main__": 
     location = "gasiri" 
-    sv_dir = f"data/original/{location}/ECMWF"
+    sv_dir = str(PROJECT_ROOT / "data" / "original" / location / "ECMWF")
     
     with open(metadata_root / "preprocess" / "turbine_coordinate_information.json", "r") as f: 
         coordinate_list = json.load(f)[location] 

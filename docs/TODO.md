@@ -12,6 +12,12 @@
 
 ## Planned
 
+### 하드코딩된 절대경로 제거 (`src/data/download/`)
+- `ECMWF.py`: `metadata_root`, `sv_dir`
+- `KMA.py`: `__main__` 블록 내 경로들
+- `elevation.py`: 모듈 레벨 + `__main__` 블록 경로 (옛 프로젝트 경로 `projects/windpower_forecasting/meta/`)
+- [x] 프로젝트 루트 기준 상대경로로 변환
+
 ### Data Pipeline Refactoring (`src/data/`)
 - Download (KMA, ECMWF), NWP preprocessing (GRIB2/TXT readers, validators, derived variables), Training data builder
 - [ ] Design document
@@ -32,7 +38,15 @@
 - [ ] 설계 문서 작성
 - [ ] 구현
 
+### Runner model_name 설정
+- Runner에서 model_name을 설정 가능하게 변경
+- [ ] 구현
+
 ### Combining 모듈 설계
 - 다중 모형 예측 결합 (forecast combination) 모듈
 - [ ] 설계 문서 작성
+- [ ] 구현
+
+### Combining 객체 save/load
+- Combining 모듈의 학습된 가중치 등 직렬화/역직렬화 지원
 - [ ] 구현

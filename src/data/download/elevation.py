@@ -1,9 +1,12 @@
-import requests 
+import requests
 from dotenv import load_dotenv
-import os 
-import time 
-import json 
-import pandas as pd 
+import os
+import time
+import json
+from pathlib import Path
+import pandas as pd
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 load_dotenv() 
 api_key = os.getenv("ELEVATION") 
@@ -42,13 +45,13 @@ def get_elevation(lat, lng):
         response.raise_for_status()
         
 
-with open("meta/minmax_height_in_meter.json", "r") as f: 
-    elevation_info = json.load(f) 
-    
-with open("meta/turbine_coordinate_information.json", "r") as f: 
-    coordinate_info = json.load(f) 
-    
-TURBINE_SPEC_PATH = "meta/turbine_spec.xlsx" 
+with open(PROJECT_ROOT / "data" / "meta" / "minmax_height_in_meter.json", "r") as f:
+    elevation_info = json.load(f)
+
+with open(PROJECT_ROOT / "data" / "meta" / "turbine_coordinate_information.json", "r") as f:
+    coordinate_info = json.load(f)
+
+TURBINE_SPEC_PATH = PROJECT_ROOT / "data" / "meta" / "turbine_spec.xlsx"
 excel_file = pd.ExcelFile(TURBINE_SPEC_PATH) 
 sheet_names = excel_file.sheet_names 
 
@@ -95,7 +98,7 @@ if __name__ == "__main__":
                 print(f"There is no turbine spec information: {e}")
     
     if changed: 
-        with open("meta/minmax_height_in_meter.json", "w") as f: 
+        with open(PROJECT_ROOT / "data" / "meta" / "minmax_height_in_meter.json", "w") as f:
             json.dump(elevation_info, f) 
     
 
