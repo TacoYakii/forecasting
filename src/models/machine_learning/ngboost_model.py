@@ -144,6 +144,7 @@ class NGBoostForecaster(BaseForecaster):
             dist_name=self._forecast_dist_name,
             params=params,
             basis_index=target_index,
+            model_name=type(self).__name__,
         )
 
     def _extract_native_params(self, pred_dist) -> Dict[str, np.ndarray]:

@@ -374,6 +374,7 @@ class RollingRunner:
                 dist_name=first.dist_name,
                 params=stacked_params,
                 basis_index=basis_index,
+                model_name=first.model_name,
             )
 
         if isinstance(first, SampleForecastResult):
@@ -383,6 +384,7 @@ class RollingRunner:
             return SampleForecastResult(
                 samples=samples_all,
                 basis_index=basis_index,
+                model_name=first.model_name,
             )
 
         if isinstance(first, QuantileForecastResult):
@@ -395,6 +397,7 @@ class RollingRunner:
             return QuantileForecastResult(
                 quantiles_data=quantiles_data,
                 basis_index=basis_index,
+                model_name=first.model_name,
             )
 
         raise TypeError(
@@ -676,10 +679,13 @@ class PerHorizonRunner(BaseModel):
                 series = pd.Series(np.ravel(vals), index=basis_idx)
                 params_matrices[key][:, col_idx] = series.loc[common_idx].values
 
+        # Get model_name from any horizon's result
+        first_result = next(iter(horizon_results.values()))[0]
         return ParametricForecastResult(
             dist_name=self.dist_name,
             params=params_matrices,
             basis_index=common_idx,
+            model_name=first_result.model_name,
         )
 
     def forecast_horizon(self, h: int) -> ParametricForecastResult:

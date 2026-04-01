@@ -558,4 +558,5 @@ class DeterministicForecaster(BaseForecaster):
             dist_name=self.distribution,
             params=params,
             basis_index=target_index,
+            model_name=type(self).__name__,
         )

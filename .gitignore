@@ -14,7 +14,7 @@ package-lock.json
 package.json
 
 # Dataset
-/data/**
+/data/
 **/res/
 *.csv
 
@@ -33,4 +33,5 @@ lightning_logs/
 *.log
 *.csv
 
-/etc/*.ipynb
+/etc/
+data

@@ -1,14 +1,14 @@
 # TODO
 
-## In Progress
+## Done
 
 ### ForecastResult / Distribution 역할 분리
 - 설계 문서: `docs/forecast_result_distribution_design.md`
-- [ ] Distribution에 `interval()` 메서드 추가
-- [ ] ForecastResult에서 `mean()`, `std()`, `quantile()`, `interval()` 제거
-- [ ] ForecastResult `to_dataframe()` 내부 구현을 `to_distribution(h)` 경유로 변경
-- [ ] 테스트 코드 일괄 수정
-- [ ] Docstring example 업데이트
+- [x] Distribution에 `interval()` 메서드 추가
+- [x] ForecastResult에서 `mean()`, `std()`, `quantile()`, `interval()` 제거
+- [x] ForecastResult `to_dataframe()` 내부 구현을 `to_distribution(h)` 경유로 변경
+- [x] 테스트 코드 일괄 수정
+- [x] Docstring example 업데이트
 
 ## Planned
 

@@ -634,6 +634,7 @@ class GarchBase(BaseForecaster):
             dist_name=dist_name,
             params=params,
             basis_index=basis_index,
+            model_name=type(self).__name__,
         )
 
     # ------------------------------------------------------------------
@@ -754,6 +755,7 @@ class GarchBase(BaseForecaster):
         return SampleForecastResult(
             samples=samples,
             basis_index=basis_index,
+            model_name=type(self).__name__,
         )
 
     # ------------------------------------------------------------------

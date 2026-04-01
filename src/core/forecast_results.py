@@ -36,17 +36,20 @@ class BaseForecastResult(ABC):
 
     Attributes:
         basis_index (pd.Index): Time index for each forecast origin (length N).
+        model_name (str): Name of the model that produced this result.
 
     Examples:
         >>> result = runner.forecast()
+        >>> result.model_name            # 'ArimaGarchForecaster'
         >>> dist = result.to_distribution(h=1)
         >>> dist.mean()       # (N,)
         >>> dist.ppf(0.9)     # (N,)
         >>> dist.interval()   # (lower, upper)
     """
 
-    def __init__(self, basis_index: pd.Index):
+    def __init__(self, basis_index: pd.Index, model_name: str = ""):
         self.basis_index = basis_index
+        self.model_name = model_name
 
     @property
     def horizon(self) -> int:
@@ -97,6 +100,36 @@ class BaseForecastResult(ABC):
         data = np.concatenate([mu, sigma], axis=1)
         return pd.DataFrame(data, index=self.basis_index, columns=columns)
 
+    def reindex(self, idx: pd.Index) -> "BaseForecastResult":
+        """Extract rows matching the given index, returning a new instance.
+
+        Args:
+            idx: Subset of basis_index to keep.
+
+        Returns:
+            New ForecastResult of the same type, with basis_index = idx.
+
+        Raises:
+            KeyError: If idx contains values not in self.basis_index.
+
+        Example:
+            >>> common = res_a.basis_index.intersection(res_b.basis_index)
+            >>> res_a_aligned = res_a.reindex(common)
+        """
+        positions = self.basis_index.get_indexer(idx)
+        missing = positions == -1
+        if missing.any():
+            bad = idx[missing].tolist()
+            raise KeyError(f"Index values not found in basis_index: {bad}")
+        return self._reindex_positions(positions, idx)
+
+    @abstractmethod
+    def _reindex_positions(
+        self, positions: np.ndarray, idx: pd.Index
+    ) -> "BaseForecastResult":
+        """Subclass hook: slice internal data by positional indices."""
+        ...
+
     def __len__(self) -> int:
         return len(self.basis_index)
 
@@ -137,6 +170,7 @@ class ParametricForecastResult(BaseForecastResult):
         dist_name: str,
         params: Dict[str, np.ndarray],
         basis_index: pd.Index,
+        model_name: str = "",
     ):
         if dist_name not in DISTRIBUTION_REGISTRY:
             raise ValueError(
@@ -160,7 +194,7 @@ class ParametricForecastResult(BaseForecastResult):
                 f"basis_index length ({len(basis_index)})"
             )
 
-        super().__init__(basis_index)
+        super().__init__(basis_index, model_name)
         self.dist_name = dist_name
         self.params = params
 
@@ -174,6 +208,17 @@ class ParametricForecastResult(BaseForecastResult):
         return (
             f"ParametricForecastResult(N={N}, H={H}, "
             f"dist='{self.dist_name}', params={list(self.params.keys())})"
+        )
+
+    def _reindex_positions(
+        self, positions: np.ndarray, idx: pd.Index
+    ) -> "ParametricForecastResult":
+        sliced_params = {k: v[positions, :] for k, v in self.params.items()}
+        return ParametricForecastResult(
+            dist_name=self.dist_name,
+            params=sliced_params,
+            basis_index=idx,
+            model_name=self.model_name,
         )
 
     def to_distribution(self, h: int) -> ParametricDistribution:
@@ -221,6 +266,7 @@ class QuantileForecastResult(BaseForecastResult):
         self,
         quantiles_data: Dict[float, np.ndarray],
         basis_index: pd.Index,
+        model_name: str = "",
     ):
         if not quantiles_data:
             raise ValueError("quantiles_data must not be empty")
@@ -242,7 +288,7 @@ class QuantileForecastResult(BaseForecastResult):
                 f"basis_index length ({len(basis_index)})"
             )
 
-        super().__init__(basis_index)
+        super().__init__(basis_index, model_name)
         self._quantiles_data: Dict[float, np.ndarray] = {
             q: np.asarray(arr, dtype=float)
             for q, arr in sorted(quantiles_data.items())
@@ -259,6 +305,16 @@ class QuantileForecastResult(BaseForecastResult):
         return (
             f"QuantileForecastResult(N={N}, H={H}, "
             f"quantiles={q_levels})"
+        )
+
+    def _reindex_positions(
+        self, positions: np.ndarray, idx: pd.Index
+    ) -> "QuantileForecastResult":
+        sliced = {q: arr[positions, :] for q, arr in self._quantiles_data.items()}
+        return QuantileForecastResult(
+            quantiles_data=sliced,
+            basis_index=idx,
+            model_name=self.model_name,
         )
 
     @property
@@ -325,6 +381,7 @@ class SampleForecastResult(BaseForecastResult):
         self,
         samples: np.ndarray,
         basis_index: pd.Index,
+        model_name: str = "",
     ):
         samples = np.asarray(samples, dtype=float)
 
@@ -339,7 +396,7 @@ class SampleForecastResult(BaseForecastResult):
                 f"basis_index length ({len(basis_index)})"
             )
 
-        super().__init__(basis_index)
+        super().__init__(basis_index, model_name)
         self._samples = samples
 
     def _get_horizon(self) -> int:
@@ -348,6 +405,15 @@ class SampleForecastResult(BaseForecastResult):
     def __repr__(self) -> str:
         N, S, H = self._samples.shape
         return f"SampleForecastResult(N={N}, n_samples={S}, H={H})"
+
+    def _reindex_positions(
+        self, positions: np.ndarray, idx: pd.Index
+    ) -> "SampleForecastResult":
+        return SampleForecastResult(
+            samples=self._samples[positions, :, :],
+            basis_index=idx,
+            model_name=self.model_name,
+        )
 
     @property
     def samples(self) -> np.ndarray:

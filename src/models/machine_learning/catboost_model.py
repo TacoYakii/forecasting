@@ -126,6 +126,7 @@ class CatBoostForecaster(BaseForecaster):
                 "scale": np.maximum(std, 1e-9).reshape(-1, 1),
             },
             basis_index=target_index,
+            model_name=type(self).__name__,
         )
     
     def _save_model_specific(self, model_path: Path) -> Path:

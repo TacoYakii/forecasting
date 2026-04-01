@@ -199,6 +199,7 @@ class PGBMForecaster(BaseForecaster):
             dist_name=dist_name,
             params=params,
             basis_index=target_index,
+            model_name=type(self).__name__,
         )
     
     def _save_model_specific(self, model_path: Path) -> Path:

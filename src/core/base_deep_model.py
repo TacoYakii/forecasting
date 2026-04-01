@@ -500,6 +500,7 @@ class BaseDeepModel(BaseForecaster):
             dist_name=dist_name,
             params=params,
             basis_index=basis_index,
+            model_name=type(self).__name__,
         )
 
     def _convert_quantile(
@@ -535,6 +536,7 @@ class BaseDeepModel(BaseForecaster):
         return QuantileForecastResult(
             quantiles_data=quantiles_data,
             basis_index=basis_index,
+            model_name=type(self).__name__,
         )
 
     def _get_model_column_name(self, forecast_df: pd.DataFrame) -> str:

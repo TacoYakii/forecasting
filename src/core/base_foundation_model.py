@@ -253,6 +253,7 @@ class BaseFoundationModel(BaseForecaster):
         return SampleForecastResult(
             samples=stacked,
             basis_index=basis_index,
+            model_name=type(self).__name__,
         )
 
     def predict_from_context(
@@ -278,6 +279,7 @@ class BaseFoundationModel(BaseForecaster):
         return SampleForecastResult(
             samples=samples[np.newaxis, ...],  # (1, n_samples, horizon)
             basis_index=pd.Index([0]),  # placeholder
+            model_name=type(self).__name__,
         )
 
     def _samples_to_quantile_result(
@@ -310,6 +312,7 @@ class BaseFoundationModel(BaseForecaster):
         return QuantileForecastResult(
             quantiles_data=quantiles_data,
             basis_index=basis_index,
+            model_name=type(self).__name__,
         )
 
     # ------------------------------------------------------------------
