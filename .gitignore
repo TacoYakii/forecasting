@@ -38,3 +38,4 @@ lightning_logs/
 *.csv
 
 /etc/
+/notebooks/
