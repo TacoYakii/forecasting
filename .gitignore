@@ -45,6 +45,9 @@ lightning_logs/
 *.pkl
 *.log
 *.csv
+*.ckpt
+*.pt
+*.pth
 
 /etc/
 /notebooks/
