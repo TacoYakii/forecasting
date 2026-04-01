@@ -483,6 +483,10 @@ class EmpiricalDistribution:
                     f"samples rows ({samples.shape[0]}) != index length ({len(index)})"
                 )
             self._sorted = np.sort(samples, axis=1)
+            S = self._sorted.shape[1]
+            # Equiprobable levels: Hazen plotting positions
+            self._levels = (np.arange(1, S + 1) - 0.5) / S
+            self._from_samples = True
         else:
             quantile_levels = np.asarray(quantile_levels, dtype=float)
             quantile_values = np.asarray(quantile_values, dtype=float)
@@ -501,6 +505,8 @@ class EmpiricalDistribution:
                     f"!= index length ({len(index)})"
                 )
             self._sorted = np.sort(quantile_values, axis=1)
+            self._levels = quantile_levels
+            self._from_samples = False
 
         self.index = index
         self.base_idx = base_idx
@@ -521,6 +527,11 @@ class EmpiricalDistribution:
     def ppf(self, q: Union[float, List[float], np.ndarray]) -> np.ndarray:
         """Empirical quantile function.
 
+        Sample-backed: uses np.percentile for consistency with
+        np.percentile-based conversion elsewhere in the codebase.
+        Quantile-backed: interpolates between stored (level, value) pairs,
+        preserving the probability-to-value mapping.
+
         Args:
             q: Probability value(s) in [0, 1].
 
@@ -530,15 +541,39 @@ class EmpiricalDistribution:
         q_arr = np.asarray(q, dtype=float)
         scalar = q_arr.ndim == 0
 
-        # np.percentile wants percentages 0-100
-        result = np.percentile(self._sorted, q_arr * 100, axis=1)
-        # percentile returns shape (*q_shape, T) -> transpose to (T, *q_shape)
+        if self._from_samples:
+            result = np.percentile(self._sorted, q_arr * 100, axis=1)
+            if scalar:
+                return result  # (T,)
+            return result.T  # (T, Q)
+
+        # Quantile-backed: level-aware interpolation
         if scalar:
-            return result  # already (T,)
-        return result.T  # (T, Q)
+            q_arr = q_arr.reshape(1)
+        else:
+            q_arr = q_arr.ravel()
+
+        idx = np.searchsorted(self._levels, q_arr, side="right")  # (Q,)
+        idx = np.clip(idx, 1, len(self._levels) - 1)
+
+        lo = idx - 1
+        hi = idx
+        denom = self._levels[hi] - self._levels[lo]
+        denom = np.where(denom > 0, denom, 1.0)
+        t = (q_arr - self._levels[lo]) / denom  # (Q,)
+        t = np.clip(t, 0.0, 1.0)
+
+        result = self._sorted[:, lo] * (1 - t) + self._sorted[:, hi] * t
+
+        if scalar:
+            return result[:, 0]  # (T,)
+        return result  # (T, Q)
 
     def cdf(self, x: Union[float, np.ndarray]) -> np.ndarray:
         """Empirical CDF.
+
+        Sample-backed: exact ECDF via searchsorted (F(x) = #{samples <= x} / S).
+        Quantile-backed: interpolation between (value, level) pairs.
 
         Args:
             x: Value(s) at which to evaluate. Scalar or array of shape (T,).
@@ -547,15 +582,27 @@ class EmpiricalDistribution:
             np.ndarray of shape (T,).
         """
         x_arr = np.asarray(x, dtype=float)
-        n = self._sorted.shape[1]
-        # searchsorted per row
         if x_arr.ndim == 0:
             x_arr = np.broadcast_to(float(x_arr), (len(self),))
-        counts = np.array([
-            np.searchsorted(self._sorted[i], x_arr[i], side="right")
-            for i in range(len(self))
-        ])
-        return counts / n
+        if self._from_samples:
+            S = self._sorted.shape[1]
+            counts = np.array([
+                np.searchsorted(self._sorted[i], x_arr[i], side="right")
+                for i in range(len(self))
+            ])
+            return counts / S
+        else:
+            result = np.empty(len(self), dtype=float)
+            for i in range(len(self)):
+                vals = self._sorted[i]
+                lvls = self._levels
+                # Deduplicate: keep last (max level) for F(x) = P(X <= x)
+                unique_mask = np.diff(vals, append=np.inf) > 0
+                result[i] = np.interp(
+                    x_arr[i], vals[unique_mask], lvls[unique_mask],
+                    left=0.0, right=1.0,
+                )
+            return result
 
     def pdf(self, x: Union[float, np.ndarray]) -> np.ndarray:
         """Approximate PDF via finite-difference on the empirical CDF.
@@ -576,7 +623,12 @@ class EmpiricalDistribution:
         )
 
     def sample(self, n: int = 1000, seed: Optional[int] = None) -> np.ndarray:
-        """Resample with replacement.
+        """Generate samples per time step.
+
+        For sample-backed distributions, resamples with replacement
+        from original values (preserves discrete support).
+        For quantile-backed distributions, uses inverse transform
+        sampling via ppf with independent draws per row.
 
         Args:
             n: Number of samples per time step.
@@ -586,17 +638,48 @@ class EmpiricalDistribution:
             np.ndarray of shape (T, n).
         """
         rng = np.random.default_rng(seed)
-        T, S = self._sorted.shape
-        indices = rng.integers(0, S, size=(T, n))
-        return np.take_along_axis(self._sorted, indices, axis=1)
+        T = len(self)
+        if self._from_samples:
+            # Resample with replacement from original discrete support
+            S = self._sorted.shape[1]
+            indices = rng.integers(0, S, size=(T, n))
+            return np.take_along_axis(self._sorted, indices, axis=1)
+        else:
+            # Inverse transform with independent draws per row
+            u = rng.uniform(0.0, 1.0, size=(T, n))
+            # Per-row ppf via interpolation
+            return np.array([
+                np.interp(u[i], self._levels, self._sorted[i])
+                for i in range(T)
+            ])
 
     def mean(self) -> np.ndarray:
-        """Sample mean, shape (T,)."""
-        return self._sorted.mean(axis=1)
+        """Distribution mean, shape (T,).
+
+        Sample-backed: arithmetic mean.
+        Quantile-backed: trapezoidal integration of Q(u) over levels.
+        """
+        if self._from_samples:
+            return self._sorted.mean(axis=1)
+        # E[X] = integral_0^1 Q(u) du ≈ trapezoidal rule over levels
+        du = np.diff(self._levels)  # (S-1,)
+        midvals = (self._sorted[:, :-1] + self._sorted[:, 1:]) / 2  # (T, S-1)
+        return (midvals * du).sum(axis=1)
 
     def std(self) -> np.ndarray:
-        """Sample std, shape (T,)."""
-        return self._sorted.std(axis=1)
+        """Distribution std, shape (T,).
+
+        Sample-backed: sample std.
+        Quantile-backed: from E[X^2] - E[X]^2 via trapezoidal integration.
+        """
+        if self._from_samples:
+            return self._sorted.std(axis=1)
+        du = np.diff(self._levels)
+        midvals = (self._sorted[:, :-1] + self._sorted[:, 1:]) / 2
+        mu = (midvals * du).sum(axis=1)
+        midvals_sq = (self._sorted[:, :-1] ** 2 + self._sorted[:, 1:] ** 2) / 2
+        ex2 = (midvals_sq * du).sum(axis=1)
+        return np.sqrt(np.maximum(ex2 - mu ** 2, 0.0))
 
     def interval(
         self, coverage: float = 0.9

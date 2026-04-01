@@ -83,6 +83,7 @@ from typing import Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 
 from src.core.forecast_distribution import (
     EmpiricalDistribution,
@@ -121,9 +122,11 @@ class BaseCombiner(ABC):
 
     Args:
         n_quantiles: quantile level 수. 클수록 분포 근사가 정밀해짐.
+        n_jobs: fit() 시 horizon별 병렬 worker 수 (joblib).
+            1이면 순차 실행, -1이면 모든 CPU 코어 사용.
 
     Example:
-        >>> combiner = HorizontalCombiner(n_quantiles=99)
+        >>> combiner = HorizontalCombiner(n_quantiles=99, n_jobs=4)
         >>> combiner.fit(train_results, observed)
         >>> combiner.weights_[1]  # {'ARIMA': 0.4, 'DeepAR': 0.35, 'TFT': 0.25}
         >>> combined = combiner.combine(test_results)
@@ -133,8 +136,10 @@ class BaseCombiner(ABC):
     def __init__(
         self,
         n_quantiles: int = 99,
+        n_jobs: int = 1,
     ):
         self.n_quantiles = n_quantiles
+        self.n_jobs = n_jobs
         self.quantile_levels = np.linspace(0, 1, n_quantiles + 2)[1:-1]  # (0, 1) 개구간
         self.is_fitted_ = False
         self.weights_: Dict[int, Dict[str, float]] = {}
@@ -273,10 +278,16 @@ class BaseCombiner(ABC):
         # observed도 공통 index에 맞춰 정렬
         observed_aligned = observed.loc[common_idx].values  # (N_common, H)
 
-        for h in range(1, H + 1):
+        def _fit_single(h):
             dists = self.extract_distributions(results, h)
             observed_h = observed_aligned[:, h - 1]  # (N_common,)
-            weight_array = self._fit_horizon(h, dists, observed_h)  # (M,)
+            return h, self._fit_horizon(h, dists, observed_h)  # (M,)
+
+        fit_results = Parallel(n_jobs=self.n_jobs)(
+            delayed(_fit_single)(h) for h in range(1, H + 1)
+        )
+
+        for h, weight_array in fit_results:
             self.weights_[h] = dict(zip(self._model_names, weight_array))
 
         self.is_fitted_ = True
@@ -403,10 +414,11 @@ class HorizontalCombiner(BaseCombiner):
 
     Args:
         n_quantiles: combining 결과 quantile 수 (default: 99).
+        n_jobs: horizon별 병렬 worker 수 (default: 1).
         weights: 사용자 지정 가중치. None이면 CRPS 기반 학습.
 
     Example:
-        >>> combiner = HorizontalCombiner(n_quantiles=99)
+        >>> combiner = HorizontalCombiner(n_quantiles=99, n_jobs=-1)
         >>> combiner.fit(train_results, observed)
         >>> combined = combiner.combine(test_results)
     """
@@ -414,9 +426,10 @@ class HorizontalCombiner(BaseCombiner):
     def __init__(
         self,
         n_quantiles: int = 99,
+        n_jobs: int = 1,
         weights: Optional[np.ndarray] = None,
     ):
-        super().__init__(n_quantiles=n_quantiles)
+        super().__init__(n_quantiles=n_quantiles, n_jobs=n_jobs)
         self._user_weights = weights
 
     def _fit_horizon(
@@ -452,7 +465,7 @@ class HorizontalCombiner(BaseCombiner):
         Returns:
             np.ndarray: (N, Q).
         """
-        weights = self.fitted_params_[h]  # (M,)
+        weights = np.array(list(self.weights_[h].values()))  # (M,)
 
         q_sum = np.zeros(
             (len(distributions[0]), self.n_quantiles),
@@ -495,10 +508,11 @@ class VerticalCombiner(BaseCombiner):
 
     Args:
         n_quantiles: combining 결과 quantile 수 (default: 99).
+        n_jobs: horizon별 병렬 worker 수 (default: 1).
         weights: 사용자 지정 가중치. None이면 CRPS 기반 학습.
 
     Example:
-        >>> combiner = VerticalCombiner(n_quantiles=99)
+        >>> combiner = VerticalCombiner(n_quantiles=99, n_jobs=-1)
         >>> combiner.fit(train_results, observed)
         >>> combined = combiner.combine(test_results)
     """
@@ -506,9 +520,10 @@ class VerticalCombiner(BaseCombiner):
     def __init__(
         self,
         n_quantiles: int = 99,
+        n_jobs: int = 1,
         weights: Optional[np.ndarray] = None,
     ):
-        super().__init__(n_quantiles=n_quantiles)
+        super().__init__(n_quantiles=n_quantiles, n_jobs=n_jobs)
         self._user_weights = weights
 
     def _fit_horizon(
@@ -636,7 +651,7 @@ __all__ = [
 
 | Method | Signature | 설명 |
 |--------|-----------|------|
-| `__init__` | `(n_quantiles=99)` | 공통 초기화 |
+| `__init__` | `(n_quantiles=99, n_jobs=1)` | 공통 초기화. n_jobs: horizon별 병렬 worker 수 |
 | `fit` | `(results: List[BaseForecastResult], observed: pd.DataFrame) → Self` | Training period 파라미터 학습 |
 | `combine` | `(results: List[BaseForecastResult]) → SampleForecastResult` | Test period 결합. 고정 quantile levels에서 추출 후 결합 |
 | `extract_distributions` | `(results, h: int) → List[Distribution]` | horizon별 Distribution 추출 |
@@ -773,34 +788,36 @@ for name, combiner in combiners.items():
 
 ## 7. Implementation Checklist
 
-### Phase 0: Core 확장 — `BaseForecastResult`
+### Phase 0: Core 확장 — `BaseForecastResult` ✅
 0. `src/core/forecast_results.py`
-   - `BaseForecastResult.__init__`에 `model_name: str` 파라미터 추가
-   - `BaseForecastResult.reindex(idx)` 추가 (get_indexer + fancy indexing)
-   - `ParametricForecastResult.reindex()`: params dict 슬라이싱
-   - `QuantileForecastResult.reindex()`: quantiles_data dict 슬라이싱
-   - `SampleForecastResult.reindex()`: samples 3D array 슬라이싱
-   - Runner에서 ForecastResult 생성 시 `model_name` 설정
-   - 단위 테스트: `tests/core/test_forecast_results_reindex.py`
+   - [x] `BaseForecastResult.__init__`에 `model_name: str` 파라미터 추가
+   - [x] `BaseForecastResult.reindex(idx)` 추가 (get_indexer + fancy indexing)
+   - [x] `ParametricForecastResult.reindex()`: params dict 슬라이싱
+   - [x] `QuantileForecastResult.reindex()`: quantiles_data dict 슬라이싱
+   - [x] `SampleForecastResult.reindex()`: samples 3D array 슬라이싱
+   - [x] Runner에서 ForecastResult 생성 시 `model_name` 설정
+   - [x] 단위 테스트: `tests/core/test_forecast_results_reindex.py`
 
-### Phase 1: BaseCombiner + EqualWeightCombiner
+### Phase 1: BaseCombiner + EqualWeightCombiner ✅
 1. `src/models/combining/base.py` — BaseCombiner 구현
-   - `_validate_results()`: horizon 검증 (basis_index 일치는 검증하지 않음)
-   - `_align_results()`: 공통 basis_index 추출 + `reindex()` 호출
-   - `extract_distributions()`: `to_distribution(h)` 호출
-   - `fit()`: align → horizon loop + `_fit_horizon()` 호출
-   - `combine()`: align → horizon loop + `_combine_distributions()` + `SampleForecastResult` 조립
-2. `src/models/combining/equal_weight.py` — EqualWeightCombiner 구현
-3. `src/models/combining/__init__.py` — 공개 API export
-4. 단위 테스트: `tests/models/combining/test_base.py`
+   - [x] `_validate_results()`: horizon 검증 (basis_index 일치는 검증하지 않음)
+   - [x] `_align_results()`: 공통 basis_index 추출 + `reindex()` 호출
+   - [x] `_deduplicate_names()`: 중복 model_name에 `_0`, `_1` suffix 부여
+   - [x] `extract_distributions()`: `to_distribution(h)` 호출
+   - [x] `fit()`: align → horizon loop + `_fit_horizon()` 호출
+   - [x] `combine()`: align → horizon loop + `_combine_distributions()` + `SampleForecastResult` 조립
+2. [x] `src/models/combining/equal_weight.py` — EqualWeightCombiner 구현
+3. [x] `src/models/combining/__init__.py` — 공개 API export
+4. [x] 단위 테스트: `tests/models/combining/test_base.py`
    - 검증 로직 테스트 (horizon 불일치, basis_index 불일치)
    - EqualWeightCombiner end-to-end 테스트 (합성 데이터)
+   - 중복 model_name 처리 테스트
 
-### Phase 2: HorizontalCombiner + VerticalCombiner
-5. `src/models/combining/horizontal.py` — HorizontalCombiner 구현
-   - `_fit_horizon()`: CRPS 기반 가중치 학습
+### Phase 2: HorizontalCombiner + VerticalCombiner ✅
+5. [x] `src/models/combining/horizontal.py` — HorizontalCombiner 구현
+   - `_fit_horizon()`: quantile-based CRPS → inverse-CRPS 가중치 학습
    - `_combine_distributions()`: quantile function 가중 평균
-6. `src/models/combining/vertical.py` — VerticalCombiner 구현
-   - `_fit_horizon()`: CRPS 기반 가중치 학습
-   - `_combine_distributions()`: CDF 가중 평균 + quantile 역변환
-7. 단위 테스트: `tests/models/combining/test_horizontal.py`, `test_vertical.py`
+6. [x] `src/models/combining/vertical.py` — VerticalCombiner 구현
+   - `_fit_horizon()`: quantile-based CRPS → inverse-CRPS 가중치 학습
+   - `_combine_distributions()`: CDF 가중 평균 + np.interp 기반 quantile 역변환
+7. [x] 단위 테스트: `tests/models/combining/test_horizontal.py`, `test_vertical.py`
