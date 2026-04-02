@@ -8,12 +8,15 @@ from .deterministic import (
     smape
 )
 
-# Probabilistic metrics 
+# Probabilistic metrics
 from .crps import (
+    crps,
     crps_gaussian,
     crps_laplace,
     crps_logistic,
-    crps_numerical,   
+    crps_numerical,
+    crps_quantile,
+    pinball_loss,
 )
 
 from .pit import (
@@ -37,13 +40,15 @@ ALL_METRICS.update(DETERMINISTIC_METRICS)
 ALL_METRICS.update(PROBABILISTIC_METRICS)
 
 __all__ = [
-    # single metric functions 
-    "rmse", "mae", "mape", "smape", 
-    "crps_gaussian", "crps_laplace", "crps_logistic", "crps_numerical",
-    
-    # metrics set 
+    # single metric functions
+    "rmse", "mae", "mape", "smape",
+    "crps_gaussian", "crps_laplace", "crps_logistic",
+    "crps_numerical", "crps_quantile", "pinball_loss",
+    "crps",
+
+    # metrics set
     "DETERMINISTIC_METRICS", "PROBABILISTIC_METRICS",
-    
-    # PIT set 
-    "pit_get_values", "pit_uniformity_test"
+
+    # PIT set
+    "pit_get_values", "pit_uniformity_test",
 ]
