@@ -18,6 +18,9 @@ package.json
 **/res/
 *.csv
 
+# Documentation (local reference only)
+/docs/
+
 # IDE / tool configs
 .claude/
 .kilocode/
