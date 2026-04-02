@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
+from sklearn.isotonic import IsotonicRegression
 
 from .forecast_distribution import (
     DISTRIBUTION_REGISTRY,
@@ -241,6 +242,67 @@ class ParametricForecastResult(BaseForecastResult):
 
 
 # ---------------------------------------------------------------------------
+# Quantile crossing repair
+# ---------------------------------------------------------------------------
+
+def _repair_quantile_crossings(
+    quantiles_data: Dict[float, np.ndarray],
+) -> Dict[float, np.ndarray]:
+    """Enforce monotonicity across quantile levels via isotonic regression.
+
+    For each (observation, horizon) cell, applies the PAVA algorithm
+    to project quantile values onto the closest (L2) non-decreasing
+    sequence.  Already-monotone cells are preserved exactly.
+
+    Args:
+        quantiles_data: Mapping from sorted quantile levels to arrays
+            of shape (N, H).
+
+    Returns:
+        Dict with the same keys, containing repaired arrays.
+
+    Example:
+        >>> data = {0.1: np.array([[5.0]]), 0.9: np.array([[3.0]])}
+        >>> repaired = _repair_quantile_crossings(data)
+        >>> repaired[0.1][0, 0] == repaired[0.9][0, 0] == 4.0
+        True
+    """
+    levels = sorted(quantiles_data.keys())
+    Q = len(levels)
+    if Q <= 1:
+        return quantiles_data
+
+    # Fast path: check monotonicity without full stacking
+    needs_repair = False
+    for i in range(Q - 1):
+        if np.any(quantiles_data[levels[i + 1]] < quantiles_data[levels[i]]):
+            needs_repair = True
+            break
+    if not needs_repair:
+        return quantiles_data
+
+    # Stack into (N, Q, H) only when repair is needed
+    stacked = np.stack(
+        [quantiles_data[lv] for lv in levels], axis=1
+    )  # (N, Q, H)
+    N, _, H = stacked.shape
+
+    tau = np.array(levels)
+    iso = IsotonicRegression(increasing=True, out_of_bounds="clip")
+    for n in range(N):
+        for h in range(H):
+            vec = stacked[n, :, h]
+            if np.any(np.isnan(vec)):
+                continue
+            if np.any(np.diff(vec) < 0):
+                stacked[n, :, h] = iso.fit_transform(tau, vec)
+
+    return {
+        lv: stacked[:, i, :] for i, lv in enumerate(levels)
+    }
+
+
+# ---------------------------------------------------------------------------
 # QuantileForecastResult
 # ---------------------------------------------------------------------------
 
@@ -289,14 +351,18 @@ class QuantileForecastResult(BaseForecastResult):
             )
 
         super().__init__(basis_index, model_name)
-        self._quantiles_data: Dict[float, np.ndarray] = {
-            q: np.asarray(arr, dtype=float)
-            for q, arr in sorted(quantiles_data.items())
-        }
+        # Normalize 1-D (single-horizon) to 2-D (N, 1)
+        sorted_data = {}
+        for q, arr in sorted(quantiles_data.items()):
+            a = np.asarray(arr, dtype=float)
+            if a.ndim == 1:
+                a = a[:, np.newaxis]
+            sorted_data[q] = a
+        self._quantiles_data = _repair_quantile_crossings(sorted_data)
 
     def _get_horizon(self) -> int:
         first = next(iter(self._quantiles_data.values()))
-        return first.shape[1] if first.ndim == 2 else 1
+        return first.shape[1]
 
     def __repr__(self) -> str:
         N = len(self.basis_index)

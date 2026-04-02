@@ -57,7 +57,7 @@
 - **영향**: Crossing된 quantiles는 유효한 CDF를 형성하지 못함. 평가(CRPS, PIT), 시각화, VerticalCombiner의 CDF 보간 등 downstream 전체에 영향.
 - **해결**: Isotonic regression (PAVA 알고리즘) — 단조 증가 제약 하에서 원본과의 L2 거리를 최소화하는 최적 projection. crossing이 있는 구간만 가중 평균으로 평탄화하고, 이미 monotone한 값은 보존. `sklearn.isotonic.IsotonicRegression`으로 O(Q) 구현.
 - **위치**: Combiner가 아닌 `QuantileForecastResult` 생성 시점에서 처리 (downstream 전체 커버)
-- [ ] 구현
+- [x] 구현: `_repair_quantile_crossings()` in `src/core/forecast_results.py`
 
 ### Dead Code 삭제 (완료)
 - [x] `src/utils/evaluate_module.py` — `src/utils/metrics/`가 대체

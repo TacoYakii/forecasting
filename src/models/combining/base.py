@@ -2,10 +2,6 @@
 
 Provides the common pipeline: validate → align → convert to quantiles →
 fit/combine per horizon → assemble QuantileForecastResult.
-
-TODO: Quantile crossing 처리는 QuantileForecastResult 생성 시점에서
-    수행 예정 (src/core/forecast_results.py). Combiner는 monotone
-    입력을 가정한다. 상세: docs/TODO.md "Quantile Crossing Repair"
 """
 
 from abc import ABC, abstractmethod
