@@ -1,54 +1,35 @@
 """Horizontal combining: quantile function weighted average."""
 
+import warnings
 from typing import List, Optional
 
 import numpy as np
+from scipy.optimize import minimize
+
+from src.utils.metrics import crps_quantile
 
 from .base import BaseCombiner
 
 
-def _pinball_loss(tau: np.ndarray, q: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """Pinball (quantile) loss for multiple quantile levels.
+def _horizontal_objective(w, tau, Q_stack, observed, reg_lambda):
+    """CRPS objective for horizontal (quantile averaging) combining.
 
     Args:
+        w: Weight vector, shape (M,).
         tau: Quantile levels, shape (Q,).
-        q: Predicted quantile values, shape (N, Q).
-        y: Observed values, shape (N,).
+        Q_stack: Stacked quantile arrays, shape (M, N, Q).
+        observed: Observed values, shape (N,).
+        reg_lambda: L2 regularization strength toward equal weights.
 
     Returns:
-        np.ndarray: Per-observation mean pinball loss, shape (N,).
-
-    Example:
-        >>> loss = _pinball_loss(np.array([0.5]), np.array([[1.0]]), np.array([1.5]))
+        float: CRPS + regularization penalty.
     """
-    diff = y[:, None] - q  # (N, Q)
-    loss = np.where(diff >= 0, tau * diff, (tau - 1) * diff)  # (N, Q)
-    return loss.mean(axis=1)  # (N,)
-
-
-def _crps_from_quantiles(
-    tau: np.ndarray, q: np.ndarray, y: np.ndarray
-) -> float:
-    """Approximate CRPS via quantile decomposition.
-
-    CRPS ~= 2 * mean(pinball_loss) over all quantile levels and observations.
-
-    Args:
-        tau: Quantile levels, shape (Q,).
-        q: Predicted quantile values, shape (N, Q).
-        y: Observed values, shape (N,).
-
-    Returns:
-        float: Mean CRPS across all observations.
-
-    Example:
-        >>> crps = _crps_from_quantiles(
-        ...     np.array([0.25, 0.5, 0.75]),
-        ...     np.array([[1.0, 2.0, 3.0]]),
-        ...     np.array([2.0]),
-        ... )
-    """
-    return 2.0 * _pinball_loss(tau, q, y).mean()
+    q_combined = np.einsum("m,mnq->nq", w, Q_stack)
+    loss = crps_quantile(tau, q_combined, observed, reduction="mean")
+    if reg_lambda > 0:
+        M = len(w)
+        loss += reg_lambda * np.sum((w - 1.0 / M) ** 2)
+    return loss
 
 
 class HorizontalCombiner(BaseCombiner):
@@ -57,18 +38,26 @@ class HorizontalCombiner(BaseCombiner):
     Q_combined(u) = sum_i w_i * Q_i(u)
 
     Averages quantile values at the same probability level u.
-    Weights are learned via inverse-CRPS or user-specified.
+    Weights are learned via CRPS minimization (default), inverse-CRPS
+    heuristic, or user-specified.
 
     Args:
         n_quantiles: Number of quantile levels (default 99).
         n_jobs: Parallel workers for horizon loop (default 1).
         weights: User-specified weights, shape (M,). If None,
-            learns inverse-CRPS weights during fit().
+            learns weights during fit().
+        fit_method: Weight learning strategy.
+            - "optimize": Minimize combined CRPS via SLSQP (default).
+            - "inverse_crps": Heuristic inverse-CRPS weighting.
+        reg_lambda: L2 regularization toward equal weights (default 0.0).
+        val_ratio: Fraction of data for temporal validation (default 0.0).
 
     Example:
-        >>> combiner = HorizontalCombiner(n_quantiles=99, n_jobs=-1)
+        >>> combiner = HorizontalCombiner(
+        ...     n_quantiles=99, fit_method="optimize", val_ratio=0.2
+        ... )
         >>> combiner.fit(train_results, observed)
-        >>> combined = combiner.combine(test_results)
+        >>> combiner.val_scores_  # {1: 0.32, 2: 0.35, 3: 0.41}
     """
 
     def __init__(
@@ -76,11 +65,23 @@ class HorizontalCombiner(BaseCombiner):
         n_quantiles: int = 99,
         n_jobs: int = 1,
         weights: Optional[np.ndarray] = None,
+        fit_method: str = "optimize",
+        reg_lambda: float = 0.0,
+        val_ratio: float = 0.0,
     ):
-        super().__init__(n_quantiles=n_quantiles, n_jobs=n_jobs)
+        super().__init__(
+            n_quantiles=n_quantiles, n_jobs=n_jobs, val_ratio=val_ratio
+        )
         self._user_weights = (
             None if weights is None else np.asarray(weights, dtype=float)
         )
+        if fit_method not in ("inverse_crps", "optimize"):
+            raise ValueError(
+                f"fit_method must be 'inverse_crps' or 'optimize', "
+                f"got {fit_method!r}"
+            )
+        self.fit_method = fit_method
+        self.reg_lambda = reg_lambda
 
     def _fit_horizon(
         self,
@@ -88,10 +89,11 @@ class HorizontalCombiner(BaseCombiner):
         quantile_arrays: List[np.ndarray],
         observed: np.ndarray,
     ) -> np.ndarray:
-        """Learn inverse-CRPS weights for a single horizon.
+        """Learn combining weights for a single horizon.
 
-        w_i = (1 / CRPS_i) / sum_j(1 / CRPS_j), so lower CRPS
-        yields higher weight.
+        Dispatches to inverse-CRPS heuristic or SLSQP optimization
+        based on ``fit_method``. User-specified weights always take
+        precedence.
 
         Args:
             h: Forecast horizon (1-indexed).
@@ -112,17 +114,43 @@ class HorizontalCombiner(BaseCombiner):
             )
 
         tau = self.quantile_levels
-        crps_scores = []
-        for q in quantile_arrays:
-            crps = _crps_from_quantiles(tau, q, observed)
-            crps_scores.append(crps)
+        x0 = self._inverse_crps_weights(tau, quantile_arrays, observed)
 
-        crps_arr = np.array(crps_scores)  # (M,)
+        if self.fit_method == "inverse_crps":
+            return x0
 
-        # Inverse-CRPS weighting with safety floor
-        crps_arr = np.maximum(crps_arr, 1e-12)
-        inv_crps = 1.0 / crps_arr
-        return inv_crps / inv_crps.sum()
+        # SLSQP optimization with inverse-CRPS warm start
+        M = len(quantile_arrays)
+        Q_stack = np.stack(quantile_arrays, axis=0)  # (M, N, Q)
+
+        result = minimize(
+            _horizontal_objective,
+            x0,
+            args=(tau, Q_stack, observed, self.reg_lambda),
+            method="SLSQP",
+            bounds=[(0.0, 1.0)] * M,
+            constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1.0}],
+            options={"maxiter": 200, "ftol": 1e-10},
+        )
+
+        if not result.success:
+            warnings.warn(
+                f"Optimization did not converge for horizon {h}: "
+                f"{result.message}. Falling back to inverse-CRPS weights.",
+                stacklevel=2,
+            )
+            return x0
+
+        w_opt = np.maximum(result.x, 0.0)
+        if not np.all(np.isfinite(w_opt)) or w_opt.sum() <= 0:
+            warnings.warn(
+                f"Optimization returned invalid weights for horizon {h}. "
+                f"Falling back to inverse-CRPS weights.",
+                stacklevel=2,
+            )
+            return x0
+        w_opt /= w_opt.sum()
+        return w_opt
 
     def _combine_distributions(
         self,
@@ -148,7 +176,7 @@ class HorizontalCombiner(BaseCombiner):
         """
         weights = self.weights_[h]  # (M,)
 
-        q_sum = np.zeros_like(quantile_arrays[0])
+        q_sum = np.zeros_like(quantile_arrays[0], dtype=float)
         for w, q in zip(weights, quantile_arrays):
             q_sum += w * q
 

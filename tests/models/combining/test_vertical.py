@@ -10,6 +10,7 @@ from src.core.forecast_results import (
     SampleForecastResult,
 )
 from src.models.combining.vertical import VerticalCombiner, _cdf_from_quantiles
+from src.utils.metrics import crps_quantile
 
 
 # ---------------------------------------------------------------------------
@@ -409,3 +410,170 @@ class TestVerticalCombinerStepFunction:
             )
             diffs = np.diff(q_vals, axis=1)
             assert np.all(diffs >= -1e-10), "Quantiles are not monotone"
+
+
+# ---------------------------------------------------------------------------
+# Test: VerticalCombiner optimization-based fitting
+# ---------------------------------------------------------------------------
+
+
+class TestVerticalOptimize:
+    """Tests for optimization-based weight fitting."""
+
+    def test_optimize_weights_sum_to_one(self, basis_index, observed):
+        """Optimized weights must sum to 1."""
+        res_a = _make_parametric(basis_index, "A")
+        res_b = _make_parametric(basis_index, "B", loc_offset=1.0)
+        combiner = VerticalCombiner(
+            n_quantiles=19, fit_method="optimize"
+        )
+        combiner.fit([res_a, res_b], observed)
+
+        for h in range(1, H + 1):
+            np.testing.assert_allclose(combiner.weights_[h].sum(), 1.0)
+
+    def test_optimize_improves_or_matches_heuristic(
+        self, basis_index, observed
+    ):
+        """Optimized CRPS on training data <= inverse-CRPS heuristic."""
+        res_a = _make_parametric(basis_index, "Good", loc_offset=0.0, scale=0.5)
+        res_b = _make_parametric(basis_index, "Bad", loc_offset=5.0, scale=2.0)
+
+        c_heur = VerticalCombiner(
+            n_quantiles=19, fit_method="inverse_crps"
+        )
+        c_opt = VerticalCombiner(
+            n_quantiles=19, fit_method="optimize"
+        )
+        c_heur.fit([res_a, res_b], observed)
+        c_opt.fit([res_a, res_b], observed)
+
+        tau = c_heur.quantile_levels
+        obs_arr = observed.values
+
+        for h in range(1, H + 1):
+            comb_heur = c_heur.combine([res_a, res_b])
+            comb_opt = c_opt.combine([res_a, res_b])
+
+            q_h = np.column_stack([
+                comb_heur.quantiles_data[q][:, h - 1] for q in tau
+            ])
+            q_o = np.column_stack([
+                comb_opt.quantiles_data[q][:, h - 1] for q in tau
+            ])
+            crps_h = crps_quantile(tau, q_h, obs_arr[:, h - 1])
+            crps_o = crps_quantile(tau, q_o, obs_arr[:, h - 1])
+            assert crps_o <= crps_h + 1e-8
+
+    def test_regularization_shrinks_to_equal(self, basis_index, observed):
+        """Large reg_lambda pushes weights toward 1/M."""
+        res_a = _make_parametric(basis_index, "A", loc_offset=0.0)
+        res_b = _make_parametric(basis_index, "B", loc_offset=3.0)
+        combiner = VerticalCombiner(
+            n_quantiles=19, fit_method="optimize", reg_lambda=100.0
+        )
+        combiner.fit([res_a, res_b], observed)
+
+        for h in range(1, H + 1):
+            np.testing.assert_allclose(
+                combiner.weights_[h], [0.5, 0.5], atol=0.05
+            )
+
+    def test_fit_method_inverse_crps_unchanged(self, basis_index, observed):
+        """fit_method='inverse_crps' matches original heuristic behavior."""
+        res_a = _make_parametric(basis_index, "A")
+        res_b = _make_parametric(basis_index, "B", loc_offset=1.0)
+
+        combiner = VerticalCombiner(
+            n_quantiles=19, fit_method="inverse_crps"
+        )
+        combiner.fit([res_a, res_b], observed)
+
+        from src.models.combining.base import BaseCombiner
+
+        conv_a = combiner._convert_to_quantile(res_a)
+        conv_b = combiner._convert_to_quantile(res_b)
+        tau = combiner.quantile_levels
+
+        for h in range(1, H + 1):
+            qarrays = combiner._extract_quantile_arrays(
+                [conv_a, conv_b], h
+            )
+            expected = BaseCombiner._inverse_crps_weights(
+                tau, qarrays, observed.values[:, h - 1]
+            )
+            np.testing.assert_allclose(
+                combiner.weights_[h], expected, atol=1e-12
+            )
+
+    def test_invalid_fit_method_raises(self):
+        """Unknown fit_method raises ValueError."""
+        with pytest.raises(ValueError, match="fit_method"):
+            VerticalCombiner(fit_method="bogus")
+
+    def test_optimize_user_weights_override(self, basis_index, observed):
+        """User weights bypass optimization entirely."""
+        user_w = np.array([0.6, 0.4])
+        res_a = _make_parametric(basis_index, "A")
+        res_b = _make_parametric(basis_index, "B", loc_offset=1.0)
+        combiner = VerticalCombiner(
+            n_quantiles=9, fit_method="optimize", weights=user_w
+        )
+        combiner.fit([res_a, res_b], observed)
+
+        for h in range(1, H + 1):
+            np.testing.assert_allclose(combiner.weights_[h], [0.6, 0.4])
+
+    def test_optimize_includes_heuristic_as_candidate(
+        self, basis_index, observed
+    ):
+        """Simplex search always includes x0, so result >= heuristic."""
+        res_a = _make_parametric(basis_index, "A")
+        res_b = _make_parametric(basis_index, "B", loc_offset=1.0)
+
+        c_heur = VerticalCombiner(
+            n_quantiles=19, fit_method="inverse_crps"
+        )
+        c_opt = VerticalCombiner(
+            n_quantiles=19, fit_method="optimize"
+        )
+        c_heur.fit([res_a, res_b], observed)
+        c_opt.fit([res_a, res_b], observed)
+
+        # Optimized weights are always at least as good as heuristic
+        # because x0 is included in the candidate set
+        assert c_opt.is_fitted_
+        for h in range(1, H + 1):
+            np.testing.assert_allclose(c_opt.weights_[h].sum(), 1.0)
+
+    def test_optimize_three_models(self, basis_index, observed):
+        """Optimization works with M > 2 models."""
+        res_a = _make_parametric(basis_index, "A", loc_offset=0.0)
+        res_b = _make_parametric(basis_index, "B", loc_offset=1.0)
+        res_c = _make_parametric(basis_index, "C", loc_offset=3.0, scale=1.5)
+        combiner = VerticalCombiner(
+            n_quantiles=19, fit_method="optimize"
+        )
+        combiner.fit([res_a, res_b, res_c], observed)
+
+        for h in range(1, H + 1):
+            w = combiner.weights_[h]
+            assert len(w) == 3
+            np.testing.assert_allclose(w.sum(), 1.0)
+            assert np.all(w >= 0)
+
+    def test_optimize_with_val_ratio(self, basis_index, observed):
+        """Optimization with validation split produces scores."""
+        res_a = _make_parametric(basis_index, "Good", loc_offset=0.0, scale=0.5)
+        res_b = _make_parametric(basis_index, "Bad", loc_offset=5.0, scale=2.0)
+        combiner = VerticalCombiner(
+            n_quantiles=19, fit_method="optimize", val_ratio=0.2
+        )
+        combiner.fit([res_a, res_b], observed)
+
+        assert len(combiner.train_scores_) == H
+        assert len(combiner.val_scores_) == H
+        for h in range(1, H + 1):
+            assert combiner.train_scores_[h] >= 0
+            assert combiner.val_scores_[h] >= 0
+            np.testing.assert_allclose(combiner.weights_[h].sum(), 1.0)

@@ -3,11 +3,9 @@
 Provides the common pipeline: validate → align → convert to quantiles →
 fit/combine per horizon → assemble QuantileForecastResult.
 
-TODO: MQLoss/IQLoss 기반 모델은 각 분위수를 독립적으로 예측하므로
-    quantile crossing (Q(tau_i) > Q(tau_j) for tau_i < tau_j)이
-    발생할 수 있다. Crossing quantiles가 VerticalCombiner의 CDF
-    보간을 왜곡하므로, 입력 검증 또는 isotonic regression 기반
-    monotone repair가 필요하다.
+TODO: Quantile crossing 처리는 QuantileForecastResult 생성 시점에서
+    수행 예정 (src/core/forecast_results.py). Combiner는 monotone
+    입력을 가정한다. 상세: docs/TODO.md "Quantile Crossing Repair"
 """
 
 from abc import ABC, abstractmethod
@@ -22,6 +20,7 @@ from src.core.forecast_results import (
     QuantileForecastResult,
     SampleForecastResult,
 )
+from src.utils.metrics import crps_quantile
 
 
 class BaseCombiner(ABC):
@@ -36,11 +35,17 @@ class BaseCombiner(ABC):
         quantile_levels (np.ndarray): Evenly spaced levels in (0, 1).
         weights_ (Dict[int, np.ndarray]): Learned per-horizon weights,
             keyed by horizon (1-indexed). Each value has shape (M,).
+        train_scores_ (Dict[int, float]): Per-horizon CRPS on training set.
+        val_scores_ (Dict[int, float]): Per-horizon CRPS on validation set.
+            Empty when ``val_ratio=0``.
         model_names_ (List[str]): Model names from fit(), for display only.
 
     Args:
         n_quantiles: Number of quantile levels (default 99).
         n_jobs: Parallel workers for horizon loop (default 1).
+        val_ratio: Fraction of data to hold out as temporal validation
+            set (default 0.0, no split). Last ``val_ratio`` fraction is
+            used for validation; weights are learned on the rest.
 
     Example:
         >>> combiner = EqualWeightCombiner(n_quantiles=99)
@@ -48,16 +53,28 @@ class BaseCombiner(ABC):
         >>> combined = combiner.combine(test_results)
     """
 
-    def __init__(self, n_quantiles: int = 99, n_jobs: int = 1):
+    def __init__(
+        self,
+        n_quantiles: int = 99,
+        n_jobs: int = 1,
+        val_ratio: float = 0.0,
+    ):
         if n_quantiles < 2:
             raise ValueError(
                 f"n_quantiles must be >= 2, got {n_quantiles}."
             )
+        if not 0.0 <= val_ratio < 1.0:
+            raise ValueError(
+                f"val_ratio must be in [0, 1), got {val_ratio}."
+            )
         self.n_quantiles = n_quantiles
         self.n_jobs = n_jobs
+        self.val_ratio = val_ratio
         self.quantile_levels = np.linspace(0, 1, n_quantiles + 2)[1:-1]
         self.is_fitted_ = False
         self.weights_: Dict[int, np.ndarray] = {}
+        self.train_scores_: Dict[int, float] = {}
+        self.val_scores_: Dict[int, float] = {}
         self._horizon: Optional[int] = None
         self._n_models: Optional[int] = None
         self.model_names_: Optional[List[str]] = None
@@ -103,6 +120,35 @@ class BaseCombiner(ABC):
         if not np.isclose(weights.sum(), 1.0):
             raise ValueError("Weights must sum to 1.")
         return weights
+
+    @staticmethod
+    def _inverse_crps_weights(
+        tau: np.ndarray,
+        quantile_arrays: List[np.ndarray],
+        observed: np.ndarray,
+    ) -> np.ndarray:
+        """Compute inverse-CRPS weights: w_i = (1/CRPS_i) / sum(1/CRPS_j).
+
+        Args:
+            tau: Quantile levels, shape (Q,).
+            quantile_arrays: M arrays of shape (N, Q).
+            observed: Observed values, shape (N,).
+
+        Returns:
+            np.ndarray: Normalized weights, shape (M,).
+
+        Example:
+            >>> weights = BaseCombiner._inverse_crps_weights(tau, qarrays, obs)
+            >>> weights.sum()
+            1.0
+        """
+        crps_scores = np.array([
+            crps_quantile(tau, q, observed, reduction="mean")
+            for q in quantile_arrays
+        ])
+        crps_scores = np.maximum(crps_scores, 1e-12)
+        inv_crps = 1.0 / crps_scores
+        return inv_crps / inv_crps.sum()
 
     def _validate_results(self, results: List[BaseForecastResult]) -> None:
         """Validate compatibility of ForecastResult list.
@@ -284,6 +330,11 @@ class BaseCombiner(ABC):
         For each horizon h, extracts distributions and calls
         ``_fit_horizon`` to obtain per-model weights.
 
+        When ``val_ratio > 0``, the last fraction of data is held out
+        as a temporal validation set. Weights are learned on the
+        training portion only. Per-horizon CRPS scores for both splits
+        are stored in ``train_scores_`` and ``val_scores_``.
+
         Args:
             results: M training-period ForecastResult objects.
             observed: Observed values, shape (N_total, H).
@@ -295,10 +346,13 @@ class BaseCombiner(ABC):
         Example:
             >>> combiner.fit(train_results, observed)
             >>> combiner.weights_[1]   # np.array([0.5, 0.5])
+            >>> combiner.val_scores_   # {1: 0.32, 2: 0.35, 3: 0.41}
         """
         # Reset fitted state so a failed refit doesn't leave stale weights
         self.is_fitted_ = False
         self.weights_ = {}
+        self.train_scores_ = {}
+        self.val_scores_ = {}
         self._horizon = None
         self._n_models = None
         self.model_names_ = None
@@ -348,8 +402,29 @@ class BaseCombiner(ABC):
             for h in range(1, H + 1)
         }
 
+        # Temporal train/validation split
+        N = observed_aligned.shape[0]
+        if self.val_ratio > 0:
+            n_val = max(1, int(N * self.val_ratio))
+            n_train = N - n_val
+            if n_train < 2:
+                raise ValueError(
+                    f"val_ratio={self.val_ratio} leaves only {n_train} "
+                    f"training samples (need >= 2). "
+                    f"Reduce val_ratio or provide more data."
+                )
+        else:
+            n_train = N
+
+        def _split_train(qarrays_h, observed_h):
+            """Split quantile arrays and observed into train portion."""
+            train_q = [q[:n_train] for q in qarrays_h]
+            train_o = observed_h[:n_train]
+            return train_q, train_o
+
         def _fit_single(h, qarrays_h, observed_h):
-            return h, self._fit_horizon(h, qarrays_h, observed_h)
+            train_q, train_o = _split_train(qarrays_h, observed_h)
+            return h, self._fit_horizon(h, train_q, train_o)
 
         if self.n_jobs == 1:
             fit_results = [
@@ -367,6 +442,27 @@ class BaseCombiner(ABC):
         for h, weight_array in fit_results:
             self._validate_weights(weight_array, self._n_models)
             self.weights_[h] = weight_array
+
+        # Compute CRPS scores on train (and validation if split)
+        # Uses _combine_distributions so scoring reflects the actual
+        # combining method (horizontal vs vertical).
+        tau = self.quantile_levels
+        for h in range(1, H + 1):
+            qarrays_h = qarrays_per_h[h]
+            observed_h = observed_aligned[:, h - 1]
+
+            train_q = [q[:n_train] for q in qarrays_h]
+            q_train = self._combine_distributions(h, train_q)
+            self.train_scores_[h] = crps_quantile(
+                tau, q_train, observed_h[:n_train], reduction="mean"
+            )
+
+            if self.val_ratio > 0:
+                val_q = [q[n_train:] for q in qarrays_h]
+                q_val = self._combine_distributions(h, val_q)
+                self.val_scores_[h] = crps_quantile(
+                    tau, q_val, observed_h[n_train:], reduction="mean"
+                )
 
         self.is_fitted_ = True
         return self

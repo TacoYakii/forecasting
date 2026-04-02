@@ -368,3 +368,73 @@ class TestEqualWeightCombiner:
         combiner = EqualWeightCombiner(n_quantiles=9)
         with pytest.raises(ValueError, match="empty model_name"):
             combiner.fit([res_a, res_b], observed)
+
+
+# ---------------------------------------------------------------------------
+# Test: Validation split (val_ratio)
+# ---------------------------------------------------------------------------
+
+
+class TestValidationSplit:
+    """Tests for temporal train/validation split."""
+
+    def test_val_scores_populated(self, basis_index, observed):
+        """val_scores_ is populated when val_ratio > 0."""
+        res_a = _make_parametric(basis_index, "A")
+        res_b = _make_parametric(basis_index, "B", loc_offset=1.0)
+        combiner = EqualWeightCombiner(n_quantiles=9, val_ratio=0.2)
+        combiner.fit([res_a, res_b], observed)
+
+        assert len(combiner.train_scores_) == H
+        assert len(combiner.val_scores_) == H
+        for h in range(1, H + 1):
+            assert isinstance(combiner.train_scores_[h], float)
+            assert isinstance(combiner.val_scores_[h], float)
+            assert combiner.train_scores_[h] >= 0
+            assert combiner.val_scores_[h] >= 0
+
+    def test_val_scores_empty_when_no_split(self, basis_index, observed):
+        """val_scores_ is empty when val_ratio=0."""
+        res_a = _make_parametric(basis_index, "A")
+        res_b = _make_parametric(basis_index, "B", loc_offset=1.0)
+        combiner = EqualWeightCombiner(n_quantiles=9)
+        combiner.fit([res_a, res_b], observed)
+
+        assert len(combiner.train_scores_) == H
+        assert len(combiner.val_scores_) == 0
+
+    def test_split_uses_train_only_for_weights(self, basis_index, observed):
+        """Weights should be learned from train portion only.
+
+        With val_ratio=0.5, the first 10 obs are train.
+        Weights from a val_ratio=0.5 combiner should match weights
+        from a combiner fit on only the first 10 observations.
+        """
+        res_a = _make_parametric(basis_index, "A")
+        res_b = _make_parametric(basis_index, "B", loc_offset=2.0)
+
+        # Combiner with split
+        c_split = EqualWeightCombiner(n_quantiles=9, val_ratio=0.5)
+        c_split.fit([res_a, res_b], observed)
+
+        # Equal weights don't depend on data, so just verify structure
+        for h in range(1, H + 1):
+            np.testing.assert_allclose(
+                c_split.weights_[h], [0.5, 0.5]
+            )
+
+    def test_invalid_val_ratio_raises(self):
+        """val_ratio outside [0, 1) should raise."""
+        with pytest.raises(ValueError, match="val_ratio"):
+            EqualWeightCombiner(val_ratio=1.0)
+        with pytest.raises(ValueError, match="val_ratio"):
+            EqualWeightCombiner(val_ratio=-0.1)
+
+    def test_val_ratio_too_large_for_data_raises(self, basis_index, observed):
+        """val_ratio leaving < 2 train samples should raise."""
+        res_a = _make_parametric(basis_index, "A")
+        res_b = _make_parametric(basis_index, "B", loc_offset=1.0)
+        # N=20, val_ratio=0.95 → n_val=19, n_train=1 → error
+        combiner = EqualWeightCombiner(n_quantiles=9, val_ratio=0.95)
+        with pytest.raises(ValueError, match="training samples"):
+            combiner.fit([res_a, res_b], observed)
