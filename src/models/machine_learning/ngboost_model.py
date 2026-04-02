@@ -85,6 +85,7 @@ class NGBoostForecaster(BaseForecaster):
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
         verbose: bool = False,
+        model_name: Optional[str] = None,
         ):
 
         super().__init__(
@@ -95,6 +96,7 @@ class NGBoostForecaster(BaseForecaster):
             enable_logging,
             save_dir,
             verbose,
+            model_name=model_name,
         )
 
         # Resolve distribution
@@ -144,7 +146,7 @@ class NGBoostForecaster(BaseForecaster):
             dist_name=self._forecast_dist_name,
             params=params,
             basis_index=target_index,
-            model_name=type(self).__name__,
+            model_name=self.nm,
         )
 
     def _extract_native_params(self, pred_dist) -> Dict[str, np.ndarray]:

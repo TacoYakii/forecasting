@@ -132,6 +132,7 @@ class PGBMForecaster(BaseForecaster):
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
         verbose: bool = False,
+        model_name: Optional[str] = None,
         ):
 
         super().__init__(
@@ -142,6 +143,7 @@ class PGBMForecaster(BaseForecaster):
             enable_logging,
             save_dir,
             verbose,
+            model_name=model_name,
         )
         
         # Validate distribution if pre-specified
@@ -199,7 +201,7 @@ class PGBMForecaster(BaseForecaster):
             dist_name=dist_name,
             params=params,
             basis_index=target_index,
-            model_name=type(self).__name__,
+            model_name=self.nm,
         )
     
     def _save_model_specific(self, model_path: Path) -> Path:

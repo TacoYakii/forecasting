@@ -108,6 +108,7 @@ class BaseFoundationModel(BaseForecaster):
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
         verbose: bool = False,
+        model_name: Optional[str] = None,
     ):
         # Merge user hyperparameters with defaults
         self._foundation_hp = dict(_DEFAULT_FOUNDATION_HP)
@@ -148,6 +149,7 @@ class BaseFoundationModel(BaseForecaster):
             enable_logging=enable_logging,
             save_dir=save_dir,
             verbose=verbose,
+            model_name=model_name,
         )
 
     # ------------------------------------------------------------------
@@ -253,7 +255,7 @@ class BaseFoundationModel(BaseForecaster):
         return SampleForecastResult(
             samples=stacked,
             basis_index=basis_index,
-            model_name=type(self).__name__,
+            model_name=self.nm,
         )
 
     def predict_from_context(
@@ -279,7 +281,7 @@ class BaseFoundationModel(BaseForecaster):
         return SampleForecastResult(
             samples=samples[np.newaxis, ...],  # (1, n_samples, horizon)
             basis_index=pd.Index([0]),  # placeholder
-            model_name=type(self).__name__,
+            model_name=self.nm,
         )
 
     def _samples_to_quantile_result(
@@ -312,7 +314,7 @@ class BaseFoundationModel(BaseForecaster):
         return QuantileForecastResult(
             quantiles_data=quantiles_data,
             basis_index=basis_index,
-            model_name=type(self).__name__,
+            model_name=self.nm,
         )
 
     # ------------------------------------------------------------------

@@ -88,8 +88,9 @@ class BaseModel(ABC):
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
         verbose: bool = False,
+        model_name: Optional[str] = None,
     ):
-        self._subclass_nm = self.__class__.__name__
+        self._subclass_nm = model_name or self.__class__.__name__
         self.enable_logging = enable_logging
 
         # Set up directories (created lazily on save_model or enable_logging)
@@ -250,12 +251,14 @@ class BaseForecaster(BaseModel):
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
         verbose: bool = False,
+        model_name: Optional[str] = None,
     ):
         super().__init__(
             hyperparameter=hyperparameter,
             enable_logging=enable_logging,
             save_dir=save_dir,
             verbose=verbose,
+            model_name=model_name,
         )
 
         self.dataset = dataset
@@ -470,6 +473,7 @@ class DeterministicForecaster(BaseForecaster):
         enable_logging: bool = True,
         save_dir: Optional[str] = None,
         verbose: bool = False,
+        model_name: Optional[str] = None,
     ):
         hp = dict(hyperparameter) if hyperparameter else {}
 
@@ -495,6 +499,7 @@ class DeterministicForecaster(BaseForecaster):
             enable_logging=enable_logging,
             save_dir=save_dir,
             verbose=verbose,
+            model_name=model_name,
         )
 
     def get_historical_std(self, target_index: pd.Index) -> np.ndarray:
@@ -558,5 +563,5 @@ class DeterministicForecaster(BaseForecaster):
             dist_name=self.distribution,
             params=params,
             basis_index=target_index,
-            model_name=type(self).__name__,
+            model_name=self.nm,
         )

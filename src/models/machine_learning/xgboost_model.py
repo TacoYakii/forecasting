@@ -63,6 +63,7 @@ class XGBoostForecaster(DeterministicForecaster):
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
         verbose: bool = False,
+        model_name: Optional[str] = None,
         ):
 
         super().__init__(
@@ -73,6 +74,7 @@ class XGBoostForecaster(DeterministicForecaster):
             enable_logging,
             save_dir,
             verbose,
+            model_name=model_name,
         )
                 
         self.model = XGBoostModel(self.hyperparameter) 

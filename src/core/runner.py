@@ -47,7 +47,7 @@ class StatefulPredictor(Protocol):
     Models that forecast from mutable internal state (ARIMA family).
 
     At each rolling step:
-      1. forecast(horizon) → (mu, sigma)
+      1. forecast(horizon) → ParametricForecastResult
       2. update_state(y_actual) to advance one step
     """
 
@@ -57,7 +57,7 @@ class StatefulPredictor(Protocol):
         self,
         horizon: int,
         x_future: Optional[np.ndarray] = None,
-    ) -> Tuple[np.ndarray, np.ndarray]: ...
+    ) -> ParametricForecastResult: ...
 
     def update_state(
         self,

@@ -84,6 +84,7 @@ class CatBoostForecaster(BaseForecaster):
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
         verbose: bool = False,
+        model_name: Optional[str] = None,
         ):
 
         super().__init__(
@@ -94,6 +95,7 @@ class CatBoostForecaster(BaseForecaster):
             enable_logging,
             save_dir,
             verbose,
+            model_name=model_name,
         )
 
         self.model = CatBoostModel(hyperparameter)
@@ -126,7 +128,7 @@ class CatBoostForecaster(BaseForecaster):
                 "scale": np.maximum(std, 1e-9).reshape(-1, 1),
             },
             basis_index=target_index,
-            model_name=type(self).__name__,
+            model_name=self.nm,
         )
     
     def _save_model_specific(self, model_path: Path) -> Path:

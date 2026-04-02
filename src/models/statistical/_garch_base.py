@@ -133,6 +133,7 @@ class GarchBase(BaseForecaster):
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
         verbose: bool = False,
+        model_name: Optional[str] = None,
     ):
         if self.config.distribution not in self._MLE_DISTRIBUTIONS:
             raise ValueError(
@@ -150,6 +151,7 @@ class GarchBase(BaseForecaster):
             enable_logging=enable_logging,
             save_dir=save_dir,
             verbose=verbose,
+            model_name=model_name,
         )
 
         n_exog = self.X.shape[1] if self.X.ndim == 2 else 0
@@ -634,7 +636,7 @@ class GarchBase(BaseForecaster):
             dist_name=dist_name,
             params=params,
             basis_index=basis_index,
-            model_name=type(self).__name__,
+            model_name=self.nm,
         )
 
     # ------------------------------------------------------------------
@@ -755,7 +757,7 @@ class GarchBase(BaseForecaster):
         return SampleForecastResult(
             samples=samples,
             basis_index=basis_index,
-            model_name=type(self).__name__,
+            model_name=self.nm,
         )
 
     # ------------------------------------------------------------------

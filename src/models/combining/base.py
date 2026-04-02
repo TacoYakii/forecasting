@@ -378,8 +378,26 @@ class BaseCombiner(ABC):
         self.model_names_ = names
         common_idx = results[0].basis_index
 
+        # Intersect with observed index — forecast results may contain
+        # origins without future actuals (e.g. last H origins)
+        fit_idx = common_idx.intersection(observed.index)
+        if len(fit_idx) == 0:
+            raise ValueError(
+                "No overlap between forecast results basis_index and "
+                "observed index."
+            )
+
+        n_trimmed = len(common_idx) - len(fit_idx)
+        if n_trimmed > 0:
+            print(
+                f"[BaseCombiner.fit] Trimmed {n_trimmed} origins without "
+                f"observed data: {len(common_idx)} → {len(fit_idx)} "
+                f"({len(fit_idx)} used for fitting)"
+            )
+            results = [r.reindex(fit_idx) for r in results]
+
         # Validate observed shape and finiteness
-        observed_common = observed.loc[common_idx]
+        observed_common = observed.loc[fit_idx]
         if observed_common.shape[1] != H:
             raise ValueError(
                 f"observed must have {H} columns (one per horizon), "

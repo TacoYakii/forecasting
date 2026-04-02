@@ -65,6 +65,7 @@ class SarimaGarchForecaster(GarchBase):
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
         verbose: bool = False,
+        model_name: Optional[str] = None,
     ):
         self.config = config or SarimaGarchConfig()
 
@@ -83,6 +84,7 @@ class SarimaGarchForecaster(GarchBase):
             enable_logging=enable_logging,
             save_dir=save_dir,
             verbose=verbose,
+            model_name=model_name,
         )
 
     # ------------------------------------------------------------------

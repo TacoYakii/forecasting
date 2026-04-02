@@ -118,6 +118,7 @@ class BaseDeepModel(BaseForecaster):
         enable_logging: bool = False,
         save_dir: Optional[str] = None,
         verbose: bool = False,
+        model_name: Optional[str] = None,
     ):
         # Store futr/hist split for NeuralForecast
         self.futr_cols: List[str] = list(futr_cols) if futr_cols else []
@@ -161,6 +162,7 @@ class BaseDeepModel(BaseForecaster):
             enable_logging=enable_logging,
             save_dir=save_dir,
             verbose=verbose,
+            model_name=model_name,
         )
 
     # ------------------------------------------------------------------
@@ -500,7 +502,7 @@ class BaseDeepModel(BaseForecaster):
             dist_name=dist_name,
             params=params,
             basis_index=basis_index,
-            model_name=type(self).__name__,
+            model_name=self.nm,
         )
 
     def _convert_quantile(
@@ -536,7 +538,7 @@ class BaseDeepModel(BaseForecaster):
         return QuantileForecastResult(
             quantiles_data=quantiles_data,
             basis_index=basis_index,
-            model_name=type(self).__name__,
+            model_name=self.nm,
         )
 
     def _get_model_column_name(self, forecast_df: pd.DataFrame) -> str:
