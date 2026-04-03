@@ -188,7 +188,6 @@ class TestRollingRunner:
 
         result = runner.run(
             horizon=HORIZON,
-            dist_name="normal",
             show_progress=False,
         )
 

@@ -130,12 +130,11 @@ class TestPerHorizonRunner:
 
         runner = PerHorizonRunner(
             data_dir=per_horizon_csv_dir,
-            model_name="lr",
+            registry_key="lr",
             y_col=Y_COL,
             exog_cols=EXOG_COLS,
             training_period=("2023-01-01", TRAIN_END),
             forecast_period=(FORECAST_START, FORECAST_END),
-            enable_logging=False,
             save_dir=str(tmp_path),
         )
         runner.fit()
@@ -163,12 +162,11 @@ class TestPerHorizonRunner:
 
         runner = PerHorizonRunner(
             data_dir=per_horizon_csv_dir,
-            model_name="lr",
+            registry_key="lr",
             y_col=Y_COL,
             exog_cols=EXOG_COLS,
             training_period=("2023-01-01", TRAIN_END),
             forecast_period=(FORECAST_START, FORECAST_END),
-            enable_logging=False,
             save_dir=str(tmp_path),
         )
         runner.fit()

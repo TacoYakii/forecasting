@@ -1,8 +1,7 @@
-"""
-Runner classes for orchestrating forecasting workflows.
+"""Runner classes for orchestrating forecasting workflows.
 
 This module provides orchestrator classes that manage model evaluation
-externally — models only handle fit/forecast, runners handle everything else.
+externally -- models only handle fit/forecast, runners handle everything else.
 
 - RollingRunner:     Time-series rolling evaluation (Statistical, Deep, Foundation)
 - PerHorizonRunner:  Per-horizon independent ML models
@@ -12,107 +11,67 @@ from __future__ import annotations
 
 import re
 import logging
+import warnings
+from datetime import datetime
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Dict,
     List,
     Optional,
-    Protocol,
     Tuple,
     Union,
-    runtime_checkable,
     Self,
 )
 
 import numpy as np
 import pandas as pd
+import yaml
 from tqdm.auto import tqdm
 
 from .base_model import BaseForecaster
 from .forecast_distribution import DISTRIBUTION_REGISTRY
-from .forecast_results import ParametricForecastResult
+from .forecast_results import (
+    ParametricForecastResult,
+    _save_forecast_result,
+)
 
 if TYPE_CHECKING:
     from .forecast_results import QuantileForecastResult, SampleForecastResult
 
 
 # ======================================================================
-# Protocols — define how RollingRunner interacts with models
-# ======================================================================
-
-@runtime_checkable
-class StatefulPredictor(Protocol):
-    """
-    Models that forecast from mutable internal state (ARIMA family).
-
-    At each rolling step:
-      1. forecast(horizon) → ParametricForecastResult
-      2. update_state(y_actual) to advance one step
-    """
-
-    is_fitted_: bool
-
-    def forecast(
-        self,
-        horizon: int,
-        x_future: Optional[np.ndarray] = None,
-    ) -> ParametricForecastResult: ...
-
-    def update_state(
-        self,
-        y_new: float,
-        x_new: Optional[np.ndarray] = None,
-    ) -> None: ...
-
-
-@runtime_checkable
-class ContextPredictor(Protocol):
-    """
-    Models that forecast from a context window (deep learning, foundation).
-
-    At each rolling step the runner builds a context window and calls
-    predict_from_context() — no internal state mutation.
-    """
-
-    is_fitted_: bool
-
-    def predict_from_context(
-        self,
-        context_y: np.ndarray,
-        horizon: int,
-        **kwargs,
-    ): ...
-
-
-# ======================================================================
-# RollingRunner — time-series rolling evaluation
+# RollingRunner -- time-series rolling evaluation
 # ======================================================================
 
 class RollingRunner:
-    """
-    Rolling multi-step-ahead forecast orchestrator.
+    """Rolling multi-step-ahead forecast orchestrator.
 
-    Dispatches between two rolling strategies based on the model type:
+    Dispatches between two rolling strategies based on the model type
+    using hasattr-based duck typing:
 
-      StatefulPredictor (ARIMA family):
+      Stateful models (has ``update_state``):
         1. forecast(horizon) from current state
         2. Record output
         3. update_state(y_actual) to advance one step
 
-      ContextPredictor (Deep learning / Foundation):
+      Context models (has ``predict_from_context``):
         1. Build context window (all data up to current time)
         2. predict_from_context(context, horizon)
         3. Record output, slide window forward
 
+    When exogenous variables are present, the forecast period is truncated
+    by ``horizon - 1`` steps at the end to avoid padding with synthetic data.
+
     Args:
-        model:           A fitted model (StatefulPredictor or ContextPredictor).
+        model:           A fitted model (Stateful or Context).
         dataset:         Full DataFrame (train + test), sorted by time index.
         y_col:           Target column name.
         forecast_period: (start, end) tuple defining the evaluation period.
         exog_cols:       Exogenous column names for Statistical/Foundation models.
         futr_cols:       Future-known exogenous columns for Deep models (NWP etc.).
         hist_cols:       Historical-only exogenous columns for Deep models (SCADA obs etc.).
+        save_dir:        Directory for saving results and model state. None = no saving.
 
     Example:
         >>> model = ArimaGarchForecaster(dataset=train_df, ...).fit()
@@ -125,13 +84,14 @@ class RollingRunner:
 
     def __init__(
         self,
-        model: Union[StatefulPredictor, ContextPredictor],
+        model,
         dataset: pd.DataFrame,
         y_col: str,
         forecast_period: Tuple,
         exog_cols: Optional[List[str]] = None,
         futr_cols: Optional[List[str]] = None,
         hist_cols: Optional[List[str]] = None,
+        save_dir: Optional[str] = None,
     ):
         if not model.is_fitted_:
             raise RuntimeError("Model must be fitted before rolling forecast.")
@@ -143,6 +103,7 @@ class RollingRunner:
         self._futr_cols = futr_cols or []
         self._hist_cols = hist_cols or []
         self._forecast_period = forecast_period
+        self._save_dir = Path(save_dir) if save_dir else None
 
         self._forecast_data = self._dataset.loc[
             forecast_period[0] : forecast_period[1]
@@ -157,45 +118,74 @@ class RollingRunner:
         horizon: int,
         method: str = "forecast",
         method_kwargs: Optional[dict] = None,
-        dist_name: str = "normal",
         show_progress: bool = True,
     ):
-        """
-        Execute rolling evaluation over the forecast period.
+        """Execute rolling evaluation over the forecast period.
 
         Args:
             horizon:       Steps ahead at each basis time.
-            method:        For StatefulPredictor: model method name
+            method:        For Stateful models: model method name
                            (e.g. "forecast", "simulate_paths").
-                           Ignored for ContextPredictor.
+                           Ignored for Context models.
             method_kwargs: Extra kwargs passed to the model method.
-            dist_name:     Distribution name for the output.
             show_progress: If True, display a tqdm progress bar.
 
         Returns:
             ParametricForecastResult, SampleForecastResult, or
             QuantileForecastResult depending on the model's return type.
         """
-        if isinstance(self._model, StatefulPredictor):
-            return self._run_stateful(
-                horizon, method, method_kwargs, dist_name, show_progress,
+        # Save pre-rolling model state if save_dir is set
+        if self._save_dir is not None:
+            self._save_model_state("fitted")
+            self._save_runner_config(horizon=horizon)
+
+        if hasattr(self._model, "update_state"):
+            result = self._run_stateful(
+                horizon, method, method_kwargs, show_progress,
             )
-        elif isinstance(self._model, ContextPredictor):
-            return self._run_context(
-                horizon, method_kwargs, dist_name, show_progress,
+        elif hasattr(self._model, "predict_from_context"):
+            result = self._run_context(
+                horizon, method_kwargs, show_progress,
             )
         else:
             raise TypeError(
-                f"Model {type(self._model).__name__} does not satisfy "
-                f"StatefulPredictor or ContextPredictor protocol."
+                f"Model {type(self._model).__name__} has neither "
+                f"update_state nor predict_from_context"
             )
 
+        # Save post-rolling state and results if save_dir is set
+        if self._save_dir is not None:
+            self._save_model_state("post_rolling")
+            _save_forecast_result(result, self._save_dir / "forecast_result")
+            self._save_runner_config(horizon=horizon)
+
+        return result
+
+    def save_model(self) -> Optional[Path]:
+        """Save the pre-rolling model state and runner config.
+
+        Can be called before run() for crash recovery. Requires save_dir.
+
+        Returns:
+            Path to the saved model directory, or None if save_dir not set.
+
+        Example:
+            >>> runner.save_model()  # saves fitted state before run()
+        """
+        if self._save_dir is None:
+            warnings.warn(
+                "save_dir not set. Call RollingRunner with save_dir to enable saving."
+            )
+            return None
+        self._save_model_state("fitted")
+        self._save_runner_config()
+        return self._save_dir / "model" / "fitted"
+
     # ------------------------------------------------------------------
-    # StatefulPredictor (ARIMA family)
+    # Stateful models (ARIMA family)
     # ------------------------------------------------------------------
 
-    def _run_stateful(self, horizon, method, method_kwargs, dist_name, show_progress):
-        assert isinstance(self._model, StatefulPredictor)
+    def _run_stateful(self, horizon, method, method_kwargs, show_progress):
         model = self._model
 
         predict_fn = getattr(model, method, None)
@@ -210,18 +200,35 @@ class RollingRunner:
 
         forecast_times = self._forecast_data.index
         y_actual = self._forecast_data[self._y_col].to_numpy()
-        n_steps = len(forecast_times)
+        n_total = len(forecast_times)
 
+        has_exog = len(self._exog_cols) > 0
         x_aligned = (
             self._forecast_data[self._exog_cols].to_numpy()
-            if self._exog_cols
-            else np.empty((n_steps, 0))
+            if has_exog
+            else np.empty((n_total, 0))
         )
         n_exog = x_aligned.shape[1] if x_aligned.ndim == 2 else 0
 
+        # Conditional truncation: exclude last (horizon-1) steps when exog present
+        if has_exog:
+            n_valid = n_total - (horizon - 1)
+            if n_valid <= 0:
+                raise ValueError(
+                    f"Forecast period has {n_total} steps but horizon={horizon} "
+                    f"requires at least {horizon} steps with exog variables."
+                )
+            warnings.warn(
+                f"Forecast period has {n_total} steps, last {horizon - 1} steps "
+                f"excluded (insufficient exog horizon). Running {n_valid} steps.",
+                stacklevel=2,
+            )
+        else:
+            n_valid = n_total
+
         results = []
         iterator = tqdm(
-            range(n_steps), desc=f"Rolling {method}", disable=not show_progress,
+            range(n_valid), desc=f"Rolling {method}", disable=not show_progress,
         )
         for t in iterator:
             x_future = self._slice_x_future(x_aligned, t, horizon, n_exog)
@@ -236,15 +243,14 @@ class RollingRunner:
             x_t = x_aligned[t] if n_exog > 0 else None
             model.update_state(y_actual[t], x_t)
 
-        basis_index = pd.Index(forecast_times[:n_steps])
-        return self._collect_results(results, basis_index, horizon, dist_name)
+        basis_index = pd.Index(forecast_times[:n_valid])
+        return self._collect_results(results, basis_index, horizon)
 
     # ------------------------------------------------------------------
-    # ContextPredictor (Deep learning / Foundation)
+    # Context models (Deep learning / Foundation)
     # ------------------------------------------------------------------
 
-    def _run_context(self, horizon, method_kwargs, dist_name, show_progress):
-        assert isinstance(self._model, ContextPredictor)
+    def _run_context(self, horizon, method_kwargs, show_progress):
         model = self._model
 
         # Suppress PyTorch Lightning progress bars during rolling predict
@@ -254,7 +260,7 @@ class RollingRunner:
 
         kwargs = dict(method_kwargs) if method_kwargs else {}
         forecast_times = self._forecast_data.index
-        n_steps = len(forecast_times)
+        n_total = len(forecast_times)
 
         # Determine exog column sets:
         # - Deep models use futr_cols/hist_cols (split)
@@ -263,12 +269,29 @@ class RollingRunner:
         has_hist = len(self._hist_cols) > 0
         has_exog = len(self._exog_cols) > 0
 
+        # Conditional truncation for models with exog
+        any_exog = has_futr or has_exog
+        if any_exog:
+            n_valid = n_total - (horizon - 1)
+            if n_valid <= 0:
+                raise ValueError(
+                    f"Forecast period has {n_total} steps but horizon={horizon} "
+                    f"requires at least {horizon} steps with exog variables."
+                )
+            warnings.warn(
+                f"Forecast period has {n_total} steps, last {horizon - 1} steps "
+                f"excluded (insufficient exog horizon). Running {n_valid} steps.",
+                stacklevel=2,
+            )
+        else:
+            n_valid = n_total
+
         idx = self._dataset.index
         freq = pd.infer_freq(idx) or "h" if isinstance(idx, pd.DatetimeIndex) else "h"
 
         results = []
         iterator = tqdm(
-            range(n_steps), desc="Rolling predict", disable=not show_progress,
+            range(n_valid), desc="Rolling predict", disable=not show_progress,
         )
         for t in iterator:
             current_time = forecast_times[t]
@@ -293,26 +316,8 @@ class RollingRunner:
 
                 if has_futr:
                     futr_start = t + 1
-                    futr_end = min(t + horizon, n_steps)
+                    futr_end = min(t + 1 + horizon, n_total)
                     futr_data = self._forecast_data.iloc[futr_start:futr_end]
-
-                    if len(futr_data) < horizon:
-                        pad_n = horizon - len(futr_data)
-                        last_row = (
-                            futr_data.iloc[[-1]]
-                            if len(futr_data) > 0
-                            else context_data.iloc[[-1]]
-                        )
-                        pad_df = pd.concat([last_row] * pad_n, ignore_index=True)
-                        last_time = (
-                            futr_data.index[-1]
-                            if len(futr_data) > 0
-                            else current_time
-                        )
-                        pad_df.index = pd.date_range(
-                            last_time, periods=pad_n + 1, freq=freq,
-                        )[1:]
-                        futr_data = pd.concat([futr_data, pad_df])
 
                     # Only futr_cols go into future_X (no hist leakage)
                     future_X = futr_data[self._futr_cols].to_numpy()[:horizon]
@@ -335,25 +340,24 @@ class RollingRunner:
 
         pl_logger.setLevel(prev_level)
 
-        basis_index = pd.Index(forecast_times)
-        return self._collect_results(results, basis_index, horizon, dist_name)
+        basis_index = pd.Index(forecast_times[:n_valid])
+        return self._collect_results(results, basis_index, horizon)
 
     # ------------------------------------------------------------------
     # Result collection
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _collect_results(results, basis_index, horizon, dist_name):
-        """
-        Aggregate per-step outputs into a single result object.
+    def _collect_results(results, basis_index, horizon):
+        """Aggregate per-step outputs into a single result object.
 
         All models return ForecastResult objects directly. This method
         concatenates them along axis=0 (the basis/time dimension).
 
         Dispatch by return type:
-          - ParametricForecastResult → concatenate params along axis=0
-          - SampleForecastResult     → concatenate samples along axis=0
-          - QuantileForecastResult   → concatenate quantile dicts along axis=0
+          - ParametricForecastResult -> concatenate params along axis=0
+          - SampleForecastResult     -> concatenate samples along axis=0
+          - QuantileForecastResult   -> concatenate quantile dicts along axis=0
         """
         from src.core.forecast_results import (
             ParametricForecastResult,
@@ -405,6 +409,70 @@ class RollingRunner:
         )
 
     # ------------------------------------------------------------------
+    # Persistence helpers
+    # ------------------------------------------------------------------
+
+    def _save_model_state(self, state: str) -> None:
+        """Save model state to save_dir/model/{state}/.
+
+        Args:
+            state: "fitted" or "post_rolling".
+        """
+        if self._save_dir is None:
+            return
+
+        model = self._model
+        registry_key = getattr(model, "_registry_key", type(model).__name__.lower())
+        state_dir = self._save_dir / "model" / state
+        state_dir.mkdir(parents=True, exist_ok=True)
+
+        model_stem = state_dir / f"{registry_key}_model"
+        model._save_model_specific(model_stem)
+
+    def _save_runner_config(self, horizon: Optional[int] = None) -> Path:
+        """Save runner_config.yaml to save_dir.
+
+        Args:
+            horizon: Forecast horizon (included if provided).
+
+        Returns:
+            Path to the saved config file.
+        """
+        model = self._model
+        registry_key = getattr(model, "_registry_key", type(model).__name__.lower())
+
+        config = {
+            "runner_type": "RollingRunner",
+            # Load-relevant
+            "registry_key": registry_key,
+            "hyperparameter": getattr(model, "hyperparameter", {}),
+            "model_name": getattr(model, "_subclass_nm", None)
+            or getattr(model, "nm", None),
+            # Experiment record
+            "y_col": self._y_col,
+            "exog_cols": self._exog_cols if self._exog_cols else None,
+            "forecast_period": [
+                str(self._forecast_period[0]),
+                str(self._forecast_period[1]),
+            ],
+            "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        if self._futr_cols:
+            config["futr_cols"] = self._futr_cols
+        if self._hist_cols:
+            config["hist_cols"] = self._hist_cols
+        if horizon is not None:
+            config["horizon"] = horizon
+
+        self._save_dir.mkdir(parents=True, exist_ok=True)
+        config_path = self._save_dir / "runner_config.yaml"
+        with open(config_path, "w") as f:
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+        return config_path
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -414,22 +482,15 @@ class RollingRunner:
         if n_exog == 0:
             return None
         end_idx = min(t + horizon, len(x_aligned))
-        x_slice = x_aligned[t:end_idx]
-        if len(x_slice) < horizon:
-            return np.vstack([
-                x_slice,
-                np.zeros((horizon - len(x_slice), n_exog)),
-            ])
-        return x_slice
+        return x_aligned[t:end_idx]
 
 
 # ======================================================================
-# PerHorizonRunner — per-horizon independent ML models
+# PerHorizonRunner -- per-horizon independent ML models
 # ======================================================================
 
 class PerHorizonRunner:
-    """
-    Wrapper that trains independent models per forecast horizon and produces
+    """Wrapper that trains independent models per forecast horizon and produces
     a unified ParametricForecastResult.
 
     Given a directory of per-horizon CSV files (horizon_1.csv, ..., horizon_H.csv),
@@ -437,9 +498,11 @@ class PerHorizonRunner:
     trains all of them, and assembles (mu, sigma) into a single
     ParametricForecastResult of shape (N_basis, H).
 
+    This is an independent orchestrator class and does not inherit from BaseModel.
+
     Args:
         data_dir: Directory containing horizon_*.csv files.
-        model_name: Registry key ("xgboost", "ngboost", "catboost", "lr", "gbm", "pgbm").
+        registry_key: MODEL_REGISTRY key ("xgboost", "ngboost", "catboost", etc.).
         y_col: Target column name in each CSV.
         exog_cols: Feature columns. None = use all except y_col.
         training_period: (start, end) for training split, shared across all horizons.
@@ -448,14 +511,14 @@ class PerHorizonRunner:
         horizons: Explicit horizon list (1-indexed). None = auto-discover from data_dir.
         dist_name: Distribution name for the output ParametricForecastResult.
         n_jobs: Number of parallel model trainings (1=sequential, -1=all cores).
-        enable_logging: Enable file logging.
-        save_dir: Custom directory for saving.
-        verbose: Enable console logging.
+        model_name: Optional display name for ForecastResult/Combiner identification.
+        save_dir: Directory for saving models and results. None = no saving.
 
     Example:
         >>> runner = PerHorizonRunner(
         ...     data_dir="data/training_dataset/sinan/w100002/",
-        ...     model_name="ngboost",
+        ...     registry_key="ngboost",
+        ...     model_name="NGBoost_500trees",
         ...     y_col="forecast_time_observed_KPX_pwr",
         ...     training_period=("2020-01-01", "2022-12-31"),
         ...     forecast_period=("2023-01-01", "2023-06-30"),
@@ -468,7 +531,7 @@ class PerHorizonRunner:
     def __init__(
         self,
         data_dir: Union[str, Path],
-        model_name: str,
+        registry_key: str,
         y_col: str,
         exog_cols: Optional[List[str]] = None,
         training_period: Optional[Tuple] = None,
@@ -477,11 +540,11 @@ class PerHorizonRunner:
         horizons: Optional[List[int]] = None,
         dist_name: str = "normal",
         n_jobs: int = 1,
-        enable_logging: bool = False,
+        model_name: Optional[str] = None,
         save_dir: Optional[str] = None,
-        verbose: bool = False,
     ):
         self.data_dir = Path(data_dir)
+        self.registry_key = registry_key
         self.model_name = model_name
         self.y_col = y_col
         self.exog_cols = exog_cols
@@ -490,7 +553,7 @@ class PerHorizonRunner:
         self.model_hyperparameter = dict(hyperparameter) if hyperparameter else {}
         self.dist_name = dist_name
         self.n_jobs = n_jobs
-        self.verbose = verbose
+        self._save_dir = Path(save_dir) if save_dir else None
 
         if dist_name not in DISTRIBUTION_REGISTRY:
             raise ValueError(
@@ -508,17 +571,12 @@ class PerHorizonRunner:
 
         self._models: Dict[int, BaseForecaster] = {}
         self._datasets: Dict[int, pd.DataFrame] = {}
-
-        # Standalone attributes (PerHorizonRunner is not a model)
         self.is_fitted_ = False
-        self.enable_logging = enable_logging
-        self.base_dir = Path(save_dir) if save_dir else Path(".")
-        self.logger = logging.getLogger(f"PerHorizonRunner.{model_name}")
 
     def __repr__(self) -> str:
         n_fitted = sum(1 for m in self._models.values() if m.is_fitted_)
         return (
-            f"PerHorizonRunner(model='{self.model_name}', "
+            f"PerHorizonRunner(registry_key='{self.registry_key}', "
             f"horizons={len(self._horizons)}, fitted={n_fitted})"
         )
 
@@ -556,40 +614,64 @@ class PerHorizonRunner:
 
     def _fit_single_horizon(self, h: int) -> Tuple[int, BaseForecaster, pd.DataFrame]:
         """Train a single horizon model. Returns (h, fitted_model, full_df)."""
+        import inspect
         from src.core.registry import MODEL_REGISTRY
 
         df = self._load_dataset(h)
-        model_cls = MODEL_REGISTRY.get(self.model_name)
+        model_cls = MODEL_REGISTRY.get(self.registry_key)
 
         train_df = df.loc[self.training_period[0]:self.training_period[1]]
 
-        model = model_cls(
-            hyperparameter=dict(self.model_hyperparameter),
-        )
-        model.fit(
-            dataset=train_df,
-            y_col=self.y_col,
-            exog_cols=self.exog_cols,
-        )
+        # Build constructor kwargs, adapting to both current and new interfaces
+        sig = inspect.signature(model_cls.__init__)
+        params = sig.parameters
 
-        if self.enable_logging:
-            self.logger.info(f"Horizon {h}/{self._horizons[-1]} trained.")
+        if "dataset" in params:
+            # Current-style: dataset in __init__
+            kwargs: dict = {
+                "dataset": train_df,
+                "y_col": self.y_col,
+                "exog_cols": self.exog_cols,
+                "hyperparameter": dict(self.model_hyperparameter),
+                "enable_logging": False,
+                "save_dir": str(
+                    self._save_dir / "model" / f"horizon_{h}"
+                ) if self._save_dir else None,
+                "verbose": False,
+            }
+            if self.model_name is not None and "model_name" in params:
+                kwargs["model_name"] = self.model_name
+        else:
+            # New-style: dataset in fit()
+            kwargs = {
+                "hyperparameter": dict(self.model_hyperparameter),
+            }
+            if self.model_name is not None and "model_name" in params:
+                kwargs["model_name"] = self.model_name
+
+        model = model_cls(**kwargs)
+
+        # Call fit() — adapts to both old and new signatures
+        if "dataset" not in params:
+            model.fit(
+                dataset=train_df,
+                y_col=self.y_col,
+                exog_cols=self.exog_cols,
+            )
+        else:
+            model.fit()
 
         return h, model, df
 
     def fit(self) -> Self:
-        """
-        Train all per-horizon models.
+        """Train all per-horizon models.
 
         Returns:
             Self for method chaining.
-        """
-        if self.enable_logging:
-            self.logger.info(
-                f"Training {len(self._horizons)} {self.model_name} models "
-                f"(n_jobs={self.n_jobs})..."
-            )
 
+        Example:
+            >>> runner.fit()
+        """
         if self.n_jobs == 1:
             for h in self._horizons:
                 h_key, model, df = self._fit_single_horizon(h)
@@ -605,10 +687,6 @@ class PerHorizonRunner:
                 self._datasets[h_key] = df
 
         self.is_fitted_ = True
-
-        if self.enable_logging:
-            self.logger.info("All horizon models trained.")
-
         return self
 
     # ------------------------------------------------------------------
@@ -616,9 +694,7 @@ class PerHorizonRunner:
     # ------------------------------------------------------------------
 
     def _extract_result(self, model: BaseForecaster, h: int) -> Tuple[ParametricForecastResult, pd.Index]:
-        """
-        Extract ParametricForecastResult and forecast_index from a fitted per-horizon model.
-        """
+        """Extract ParametricForecastResult and forecast_index from a fitted per-horizon model."""
         df = self._datasets[h]
         forecast_data = df.loc[self.forecast_period[0]:self.forecast_period[1]]
         forecast_X = forecast_data[model.exog_cols].to_numpy()
@@ -628,11 +704,14 @@ class PerHorizonRunner:
         return result, forecast_index
 
     def forecast(self) -> ParametricForecastResult:
-        """
-        Generate unified multi-horizon forecast.
+        """Generate unified multi-horizon forecast.
 
         Returns:
             ParametricForecastResult with shape (N_common, len(horizons)).
+
+        Example:
+            >>> result = runner.forecast()
+            >>> result.to_distribution(6).ppf([0.1, 0.5, 0.9])
         """
         if not self.is_fitted_:
             raise RuntimeError("Runner not fitted. Call fit() first.")
@@ -651,11 +730,12 @@ class PerHorizonRunner:
             raise ValueError("No common basis_time indices across horizons.")
 
         max_len = max(len(v[1]) for v in horizon_results.values())
-        if len(common_idx) < max_len * 0.9 and self.enable_logging:
-            self.logger.warning(
+        if len(common_idx) < max_len * 0.9:
+            warnings.warn(
                 f"Common index ({len(common_idx)}) is significantly smaller "
                 f"than max horizon index ({max_len}). "
-                f"Some horizons may have missing data."
+                f"Some horizons may have missing data.",
+                stacklevel=2,
             )
 
         # Collect param keys from the first result
@@ -678,22 +758,32 @@ class PerHorizonRunner:
 
         # Get model_name from any horizon's result
         first_result = next(iter(horizon_results.values()))[0]
-        return ParametricForecastResult(
+        result = ParametricForecastResult(
             dist_name=self.dist_name,
             params=params_matrices,
             basis_index=common_idx,
             model_name=first_result.model_name,
         )
 
+        # Save results and models if save_dir is set
+        if self._save_dir is not None:
+            self._save_all_models()
+            _save_forecast_result(result, self._save_dir / "forecast_result")
+            self._save_runner_config()
+
+        return result
+
     def forecast_horizon(self, h: int) -> ParametricForecastResult:
-        """
-        Get the ParametricForecastResult for a single horizon.
+        """Get the ParametricForecastResult for a single horizon.
 
         Args:
             h: Forecast horizon (1-indexed, must be in self.horizons).
 
         Returns:
             ParametricForecastResult with shape (T, 1) for horizon h.
+
+        Example:
+            >>> result_h6 = runner.forecast_horizon(6)
         """
         if h not in self._models:
             raise ValueError(
@@ -710,41 +800,85 @@ class PerHorizonRunner:
     # Save / Load
     # ------------------------------------------------------------------
 
-    def _save_model_specific(self, model_path: Path) -> Path:
-        """Save all per-horizon models."""
+    def save_models(self) -> Optional[Path]:
+        """Save all per-horizon models and runner config.
+
+        Can be called after fit() for crash recovery before forecast().
+
+        Returns:
+            Path to the model directory, or None if save_dir not set.
+
+        Example:
+            >>> runner.save_models()
+        """
+        if self._save_dir is None:
+            warnings.warn(
+                "save_dir not set. Call PerHorizonRunner with save_dir to enable saving."
+            )
+            return None
+        self._save_all_models()
+        self._save_runner_config()
+        return self._save_dir / "model"
+
+    def _save_all_models(self) -> None:
+        """Save all per-horizon models to save_dir/model/horizon_*/."""
+        if self._save_dir is None:
+            return
+
         for h, model in self._models.items():
-            sv_path = self.base_dir / f"horizon_{h}" / f"{model.nm}_model"
-            sv_path.parent.mkdir(parents=True, exist_ok=True)
-            model._save_model_specific(sv_path)
-        return self.base_dir
-
-    def _load_model_specific(self, model_path: Path) -> None:
-        """Load all per-horizon models from their saved directories."""
-        from src.core.registry import MODEL_REGISTRY
-
-        for h in self._horizons:
-            df = self._load_dataset(h)
-            model_cls = MODEL_REGISTRY.get(self.model_name)
-
-            train_df = df.loc[self.training_period[0]:self.training_period[1]]
-
-            model = model_cls(
-                hyperparameter=dict(self.model_hyperparameter),
+            registry_key = getattr(
+                model, "_registry_key", type(model).__name__.lower()
             )
-            # Need to set exog_cols so forecast() can use them
-            model.fit(
-                dataset=train_df,
-                y_col=self.y_col,
-                exog_cols=self.exog_cols,
-            )
+            h_dir = self._save_dir / "model" / f"horizon_{h}"
+            h_dir.mkdir(parents=True, exist_ok=True)
+            model_stem = h_dir / f"{registry_key}_model"
+            model._save_model_specific(model_stem)
 
-            horizon_dir = self.base_dir / f"horizon_{h}"
-            model_files = list(horizon_dir.glob(f"{model_cls.__name__}_model*"))
-            if not model_files:
-                raise FileNotFoundError(
-                    f"No saved model found in {horizon_dir}"
-                )
-            model._load_model_specific(model_files[0].with_suffix(""))
-            model.is_fitted_ = True
-            self._models[h] = model
-            self._datasets[h] = df
+    def _save_runner_config(self) -> Path:
+        """Save runner_config.yaml to save_dir.
+
+        Returns:
+            Path to the saved config file.
+        """
+        config = {
+            "runner_type": "PerHorizonRunner",
+            # Load-relevant
+            "registry_key": self.registry_key,
+            "hyperparameter": self.model_hyperparameter,
+            "horizons": self._horizons,
+            "model_name": self.model_name,
+            # Experiment record
+            "y_col": self.y_col,
+            "exog_cols": self.exog_cols,
+            "training_period": [
+                str(self.training_period[0]),
+                str(self.training_period[1]),
+            ] if self.training_period else None,
+            "forecast_period": [
+                str(self.forecast_period[0]),
+                str(self.forecast_period[1]),
+            ] if self.forecast_period else None,
+            "dist_name": self.dist_name,
+            "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        self._save_dir.mkdir(parents=True, exist_ok=True)
+        config_path = self._save_dir / "runner_config.yaml"
+        with open(config_path, "w") as f:
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+        return config_path
+
+    # ------------------------------------------------------------------
+    # Legacy compatibility — delegate BaseModel attributes
+    # ------------------------------------------------------------------
+
+    @property
+    def base_dir(self) -> Optional[Path]:
+        """Legacy compat: return save_dir as base_dir."""
+        return self._save_dir
+
+    @property
+    def enable_logging(self) -> bool:
+        """Legacy compat: always False."""
+        return False
