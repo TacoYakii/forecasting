@@ -10,10 +10,12 @@ assembled from multiple forecast() calls (rolling or per-horizon):
 """
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
+import yaml
 from sklearn.isotonic import IsotonicRegression
 
 from .forecast_distribution import (
@@ -240,6 +242,35 @@ class ParametricForecastResult(BaseForecastResult):
             index=self.basis_index,
         )
 
+    def save(self, path: Union[str, Path]) -> Path:
+        """Save result to a directory.
+
+        Args:
+            path: Directory path for saving.
+
+        Returns:
+            Path to the saved directory.
+
+        Example:
+            >>> result.save("res/exp_0/forecast_result")
+        """
+        return _save_forecast_result(self, Path(path))
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "ParametricForecastResult":
+        """Load result from a directory.
+
+        Args:
+            path: Directory containing saved result files.
+
+        Returns:
+            Loaded ParametricForecastResult.
+
+        Example:
+            >>> result = ParametricForecastResult.load("res/exp_0/forecast_result")
+        """
+        return load_forecast_result(Path(path))
+
 
 # ---------------------------------------------------------------------------
 # Quantile crossing repair
@@ -414,6 +445,35 @@ class QuantileForecastResult(BaseForecastResult):
             quantile_values=values,
         )
 
+    def save(self, path: Union[str, Path]) -> Path:
+        """Save result to a directory.
+
+        Args:
+            path: Directory path for saving.
+
+        Returns:
+            Path to the saved directory.
+
+        Example:
+            >>> result.save("res/exp_0/forecast_result")
+        """
+        return _save_forecast_result(self, Path(path))
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "QuantileForecastResult":
+        """Load result from a directory.
+
+        Args:
+            path: Directory containing saved result files.
+
+        Returns:
+            Loaded QuantileForecastResult.
+
+        Example:
+            >>> result = QuantileForecastResult.load("res/exp_0/forecast_result")
+        """
+        return load_forecast_result(Path(path))
+
 
 # ---------------------------------------------------------------------------
 # SampleForecastResult
@@ -520,3 +580,158 @@ class SampleForecastResult(BaseForecastResult):
             np.ndarray: shape (n_samples, H).
         """
         return self._samples[basis_idx]
+
+    def save(self, path: Union[str, Path]) -> Path:
+        """Save result to a directory.
+
+        Args:
+            path: Directory path for saving.
+
+        Returns:
+            Path to the saved directory.
+
+        Example:
+            >>> result.save("res/exp_0/forecast_result")
+        """
+        return _save_forecast_result(self, Path(path))
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "SampleForecastResult":
+        """Load result from a directory.
+
+        Args:
+            path: Directory containing saved result files.
+
+        Returns:
+            Loaded SampleForecastResult.
+
+        Example:
+            >>> result = SampleForecastResult.load("res/exp_0/forecast_result")
+        """
+        return load_forecast_result(Path(path))
+
+
+# ---------------------------------------------------------------------------
+# Persistence helpers
+# ---------------------------------------------------------------------------
+
+def _save_forecast_result(result: BaseForecastResult, path: Path) -> Path:
+    """Save a ForecastResult to a directory.
+
+    Creates metadata.yaml, basis_index.csv, and params.npz or samples.npz.
+
+    Args:
+        result: The ForecastResult to save.
+        path: Directory path for saving.
+
+    Returns:
+        Path to the saved directory.
+
+    Example:
+        >>> _save_forecast_result(result, Path("res/exp_0/forecast_result"))
+    """
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+    # Save basis_index
+    idx_df = pd.DataFrame({"basis_time": result.basis_index})
+    idx_df.to_csv(path / "basis_index.csv", index=False)
+
+    # Build metadata
+    metadata: dict = {
+        "result_type": type(result).__name__,
+        "model_name": result.model_name,
+    }
+
+    if isinstance(result, ParametricForecastResult):
+        param_keys = list(result.params.keys())
+        metadata["dist_name"] = result.dist_name
+        metadata["param_keys"] = param_keys
+        first_val = next(iter(result.params.values()))
+        metadata["shape"] = list(first_val.shape)
+        np.savez(path / "params.npz", **result.params)
+
+    elif isinstance(result, QuantileForecastResult):
+        q_data = result.quantiles_data
+        q_levels = sorted(q_data.keys())
+        metadata["quantile_levels"] = q_levels
+        first_val = next(iter(q_data.values()))
+        metadata["shape"] = list(first_val.shape)
+        # Use string keys for npz (float keys not allowed)
+        save_dict = {str(q): q_data[q] for q in q_levels}
+        np.savez(path / "params.npz", **save_dict)
+
+    elif isinstance(result, SampleForecastResult):
+        metadata["shape"] = list(result.samples.shape)
+        np.savez(path / "samples.npz", samples=result.samples)
+
+    metadata["basis_index_file"] = "basis_index.csv"
+
+    with open(path / "metadata.yaml", "w") as f:
+        yaml.dump(metadata, f, default_flow_style=False, sort_keys=False)
+
+    return path
+
+
+def load_forecast_result(path: Union[str, Path]) -> BaseForecastResult:
+    """Load a ForecastResult from a saved directory.
+
+    Reads metadata.yaml to determine the result type, then loads the
+    corresponding data files.
+
+    Args:
+        path: Directory containing metadata.yaml, basis_index.csv,
+            and params.npz or samples.npz.
+
+    Returns:
+        The loaded ForecastResult (Parametric, Quantile, or Sample).
+
+    Raises:
+        FileNotFoundError: If metadata.yaml is not found.
+        ValueError: If result_type is unknown.
+
+    Example:
+        >>> result = load_forecast_result("res/exp_0/forecast_result")
+        >>> result.to_distribution(1).mean()
+    """
+    path = Path(path)
+
+    with open(path / "metadata.yaml") as f:
+        metadata = yaml.safe_load(f)
+
+    result_type = metadata["result_type"]
+    model_name = metadata.get("model_name", "")
+
+    # Load basis_index
+    idx_df = pd.read_csv(path / "basis_index.csv", parse_dates=["basis_time"])
+    basis_index = pd.DatetimeIndex(idx_df["basis_time"])
+
+    if result_type == "ParametricForecastResult":
+        data = np.load(path / "params.npz")
+        params = {k: data[k] for k in metadata["param_keys"]}
+        return ParametricForecastResult(
+            dist_name=metadata["dist_name"],
+            params=params,
+            basis_index=basis_index,
+            model_name=model_name,
+        )
+
+    if result_type == "QuantileForecastResult":
+        data = np.load(path / "params.npz")
+        q_levels = metadata["quantile_levels"]
+        quantiles_data = {q: data[str(q)] for q in q_levels}
+        return QuantileForecastResult(
+            quantiles_data=quantiles_data,
+            basis_index=basis_index,
+            model_name=model_name,
+        )
+
+    if result_type == "SampleForecastResult":
+        data = np.load(path / "samples.npz")
+        return SampleForecastResult(
+            samples=data["samples"],
+            basis_index=basis_index,
+            model_name=model_name,
+        )
+
+    raise ValueError(f"Unknown result_type: {result_type}")
