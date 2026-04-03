@@ -1,20 +1,22 @@
-from typing import Dict, Optional, Iterable
-from ecmwfapi import ECMWFService
+import json
+import logging
+import time
+from datetime import datetime
 from pathlib import Path
-import pandas as pd
-from tqdm import tqdm 
-from datetime import datetime 
-import time 
-import logging 
-import json 
+from typing import Dict, Iterable, Optional
+
 import location_map as lm
+import pandas as pd
+from ecmwfapi import ECMWFService
+from tqdm import tqdm
+
 
 def silent_log(msg): 
     pass 
 
 class ECMWFRetriever:
-    """
-    Manage the retrieval of weather data from the ECMWF (European Centre for Medium-Range Weather Forecasts) service.
+    """Manage the retrieval of weather data from the ECMWF (European Centre for Medium-Range Weather Forecasts) service.
+
     Attributes:
         sv_dir (Path): Directory where the retrieved files will be saved.
         info_sv_dir (Path): Parent directory of `sv_dir`, used for storing progress information.
@@ -24,6 +26,7 @@ class ECMWFRetriever:
         progress (Dict): Dictionary tracking the download progress, including session start time, total files, success count, failed files, and last updated timestamp.
         request_params (Dict): Parameters for the ECMWF data request, including class, date, time, experiment version, parameters, steps, target, stream, type, level type, and area.
         server_object (ECMWFService): Instance of the ECMWFService used to execute data requests.
+
     Methods:
         __init__(sv_dir: str, date_range: pd.DatetimeIndex, area: str, additional_settings: Optional[Dict] = None):
             Initializes the ECMWFRetriever instance, sets up directories, logger, and request parameters, and initializes progress tracking.
@@ -79,7 +82,7 @@ class ECMWFRetriever:
             with open(self.state_file, 'r') as f:
                 self.progress = json.load(f)
             
-            self.logger.info(f"Resuming from previous session")
+            self.logger.info("Resuming from previous session")
             self.logger.info(f"Total files: {self.progress['total_files']}")
             self.logger.info(f"Successfully downloaded: {self.progress['success_count']}")
             self.logger.info(f"Failed files: {len(self.progress['failed_files'])}")
@@ -104,7 +107,7 @@ class ECMWFRetriever:
         logger.setLevel(logging.INFO)
         
         if not logger.handlers:
-            log_file = self.sv_dir.parent / f"ECMWF_retriever.log"
+            log_file = self.sv_dir.parent / "ECMWF_retriever.log"
             file_handler = logging.FileHandler(log_file, mode="a")
             file_handler.setLevel(logging.INFO)
             
@@ -192,7 +195,7 @@ class ECMWFRetriever:
                             
                     except KeyboardInterrupt:
                         self.logger.info("Download interrupted by user")
-                        print(f"\nDownload interrupted. Progress saved. Resume with the same command.")
+                        print("\nDownload interrupted. Progress saved. Resume with the same command.")
                         print(f"Progress: {self.progress['success_count']}/{total_files} files completed")
                         return
                         
@@ -247,7 +250,7 @@ metadata_root = PROJECT_ROOT / "data" / "meta"
 
 
 if __name__ == "__main__": 
-    location = "gasiri" 
+    location = "dongbok" 
     sv_dir = str(PROJECT_ROOT / "data" / "original" / location / "ECMWF")
     
     with open(metadata_root / "preprocess" / "turbine_coordinate_information.json", "r") as f: 

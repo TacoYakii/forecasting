@@ -22,13 +22,13 @@ dependencies = [
 
     # foundation models
     "chronos-forecasting>=2.0",
-    "uni2ts",
+    "uni2ts==2.0.0",
     "gluonts>=0.16",
 
     # meteorological / geospatial
     "metpy>=1.7.1",
     "xarray>=2024.0",
-    "ecmwfapi",
+    "ecmwf-api-client",
     "folium>=0.18",
 
     # utilities
@@ -58,6 +58,16 @@ dev-dependencies = [
     "ruff",
     "ty",
     "pytest",
+]
+# uni2ts (Moirai) declares overly strict pins: numpy~=1.26, scipy~=1.11,
+# gluonts~=0.14, torch<2.5. These constraints conflict with our project's
+# requirements but uni2ts works fine with newer versions (verified: numpy 2.4,
+# scipy 1.17, gluonts 0.16, torch 2.11 — all 177 tests pass).
+override-dependencies = [
+    "numpy>=2.1",
+    "scipy>=1.14",
+    "gluonts>=0.16",
+    "torch>=2.5",
 ]
 
 # ── ty ───────────────────────────────────────
