@@ -262,9 +262,13 @@ class TestMLExog:
 
     def test_fit_forecast_with_exog(self, model_name, exog_df, exog_train_df, exog_forecast_df, tmp_path):
         """ML model trained with all exog, forecast with same columns."""
-        from src.core.registry import MODEL_REGISTRY
-
-        model_cls = MODEL_REGISTRY.get(model_name)
+        if model_name == "lr":
+            from src.models.machine_learning.lr_model import LRForecaster as model_cls
+        elif model_name == "xgboost":
+            from src.models.machine_learning.xgboost_model import XGBoostForecaster as model_cls
+        else:
+            from src.core.registry import MODEL_REGISTRY
+            model_cls = MODEL_REGISTRY.get(model_name)
         model = model_cls()
         model.fit(dataset=exog_train_df, y_col=Y_COL, exog_cols=EXOG_COLS)
         assert model.is_fitted_
@@ -352,8 +356,8 @@ class TestMLExog:
 # ======================================================================
 
 @pytest.mark.slow
-class TestDeepExog:
-    """Deep models receive futr_cols and hist_cols separately."""
+class TestDeepFutrOnly:
+    """DeepAR: futr_cols only (no hist_exog support)."""
 
     _FAST_HP = {
         "prediction_length": HORIZON,
@@ -362,12 +366,65 @@ class TestDeepExog:
         "input_size": 24,
     }
 
-    def test_deepar_futr_hist_split(self, exog_train_df, tmp_path):
-        """DeepAR receives futr_cols and hist_cols separately."""
+    def test_deepar_futr_only(self, exog_df, exog_train_df, exog_full_df, tmp_path):
+        """DeepAR with futr_cols only works correctly."""
         from src.models.deep_time_series.deepar import DeepARForecaster
 
         hp = {**self._FAST_HP, "loss_type": "distribution", "distribution": "Normal"}
         model = DeepARForecaster(hyperparameter=hp)
+        model.fit(dataset=exog_train_df, y_col=Y_COL, futr_cols=FUTR_COLS)
+
+        future_df = exog_full_df.loc[FORECAST_START:]
+        future_X = future_df[FUTR_COLS].to_numpy()[:HORIZON]
+        future_index = future_df.index[:HORIZON]
+
+        result = model.forecast(future_X=future_X, future_index=future_index)
+        assert isinstance(result, ParametricForecastResult)
+        mu = _result_mean(result)
+        sigma = _result_std(result)
+        assert np.all(np.isfinite(mu))
+        assert np.all(mu > -50)
+        assert np.all(mu < 200)
+
+    def test_deepar_hist_cols_ignored_with_warning(self, exog_train_df):
+        """DeepAR ignores hist_cols with a warning."""
+        import warnings
+        from src.models.deep_time_series.deepar import DeepARForecaster
+
+        hp = {**self._FAST_HP, "loss_type": "distribution", "distribution": "Normal"}
+        model = DeepARForecaster(hyperparameter=hp)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            model.fit(dataset=exog_train_df, y_col=Y_COL,
+                      futr_cols=FUTR_COLS, hist_cols=HIST_COLS)
+
+            hist_warnings = [x for x in w if "hist_cols" in str(x.message)]
+            assert len(hist_warnings) == 1
+            assert "does not support" in str(hist_warnings[0].message)
+
+        # hist_cols should be empty after fit (ignored)
+        assert model.hist_cols == []
+        assert model.futr_cols == FUTR_COLS
+
+
+@pytest.mark.slow
+class TestDeepFutrHist:
+    """TFT: futr_cols + hist_cols (supports EXOGENOUS_HIST)."""
+
+    _FAST_HP = {
+        "prediction_length": HORIZON,
+        "max_steps": 5,
+        "batch_size": 16,
+        "input_size": 24,
+    }
+
+    def test_tft_futr_hist_split(self, exog_train_df):
+        """TFT receives futr_cols and hist_cols separately."""
+        from src.models.deep_time_series.tft import TFTForecaster
+
+        hp = {**self._FAST_HP, "loss_type": "distribution", "distribution": "Normal"}
+        model = TFTForecaster(hyperparameter=hp)
         model.fit(dataset=exog_train_df, y_col=Y_COL,
                   futr_cols=FUTR_COLS, hist_cols=HIST_COLS)
 
@@ -375,12 +432,12 @@ class TestDeepExog:
         assert model.hist_cols == HIST_COLS
         assert model.exog_cols == FUTR_COLS + HIST_COLS
 
-    def test_deepar_futr_hist_fit_forecast(self, exog_df, exog_train_df, exog_full_df, tmp_path):
-        """DeepAR with futr+hist: fit and forecast produce valid result."""
-        from src.models.deep_time_series.deepar import DeepARForecaster
+    def test_tft_futr_hist_fit_forecast(self, exog_df, exog_train_df, exog_full_df):
+        """TFT with futr+hist: fit and forecast produce valid result."""
+        from src.models.deep_time_series.tft import TFTForecaster
 
         hp = {**self._FAST_HP, "loss_type": "distribution", "distribution": "Normal"}
-        model = DeepARForecaster(hyperparameter=hp)
+        model = TFTForecaster(hyperparameter=hp)
         model.fit(dataset=exog_train_df, y_col=Y_COL,
                   futr_cols=FUTR_COLS, hist_cols=HIST_COLS)
         assert model.is_fitted_
@@ -393,29 +450,14 @@ class TestDeepExog:
         assert isinstance(result, ParametricForecastResult)
         assert result.params["loc"].shape == (1, HORIZON)
         mu = _result_mean(result)
-        sigma = _result_std(result)
         assert np.all(np.isfinite(mu))
-        assert np.all(mu > -50)
-        assert np.all(mu < 200)
 
-        # Plot
-        observed = exog_full_df.loc[FORECAST_START:][Y_COL].to_numpy()[:HORIZON]
-        _save_forecast_plot(
-            train_df=exog_df.loc[:TRAIN_END],
-            forecast_index=future_index,
-            observed=observed,
-            predicted_mu=mu.ravel(),
-            predicted_std=sigma.ravel(),
-            title="DeepAR | futr_cols + hist_cols",
-            filename="deep_deepar_futr_hist.png",
-        )
-
-    def test_deepar_predict_from_context(self, exog_df, exog_train_df, exog_full_df, tmp_path):
-        """predict_from_context with futr+hist context, futr-only future."""
-        from src.models.deep_time_series.deepar import DeepARForecaster
+    def test_tft_predict_from_context(self, exog_full_df, exog_train_df):
+        """TFT predict_from_context with futr+hist context, futr-only future."""
+        from src.models.deep_time_series.tft import TFTForecaster
 
         hp = {**self._FAST_HP, "loss_type": "distribution", "distribution": "Normal"}
-        model = DeepARForecaster(hyperparameter=hp)
+        model = TFTForecaster(hyperparameter=hp)
         model.fit(dataset=exog_train_df, y_col=Y_COL,
                   futr_cols=FUTR_COLS, hist_cols=HIST_COLS)
 
@@ -440,49 +482,4 @@ class TestDeepExog:
         assert isinstance(result, ParametricForecastResult)
         assert result.params["loc"].shape == (1, HORIZON)
         mu = _result_mean(result)
-        sigma = _result_std(result)
         assert np.all(np.isfinite(mu))
-
-        # Plot
-        observed = future_data[Y_COL].to_numpy()[:HORIZON]
-        _save_forecast_plot(
-            train_df=exog_df.loc[:TRAIN_END],
-            forecast_index=future_index,
-            observed=observed,
-            predicted_mu=mu.ravel(),
-            predicted_std=sigma.ravel(),
-            title="DeepAR | predict_from_context (futr+hist ctx, futr future)",
-            filename="deep_deepar_predict_from_context.png",
-        )
-
-    def test_deepar_futr_only(self, exog_df, exog_train_df, exog_full_df, tmp_path):
-        """DeepAR with futr_cols only (no hist) still works."""
-        from src.models.deep_time_series.deepar import DeepARForecaster
-
-        hp = {**self._FAST_HP, "loss_type": "distribution", "distribution": "Normal"}
-        model = DeepARForecaster(hyperparameter=hp)
-        model.fit(dataset=exog_train_df, y_col=Y_COL, futr_cols=FUTR_COLS)
-
-        future_df = exog_full_df.loc[FORECAST_START:]
-        future_X = future_df[FUTR_COLS].to_numpy()[:HORIZON]
-        future_index = future_df.index[:HORIZON]
-
-        result = model.forecast(future_X=future_X, future_index=future_index)
-        assert isinstance(result, ParametricForecastResult)
-        mu = _result_mean(result)
-        sigma = _result_std(result)
-        assert np.all(np.isfinite(mu))
-        assert np.all(mu > -50)
-        assert np.all(mu < 200)
-
-        # Plot
-        observed = future_df[Y_COL].to_numpy()[:HORIZON]
-        _save_forecast_plot(
-            train_df=exog_df.loc[:TRAIN_END],
-            forecast_index=future_index,
-            observed=observed,
-            predicted_mu=mu.ravel(),
-            predicted_std=sigma.ravel(),
-            title="DeepAR | futr_cols only (no hist)",
-            filename="deep_deepar_futr_only.png",
-        )

@@ -26,6 +26,12 @@ class TFTForecaster(BaseDeepModel):
     Wraps NeuralForecast TFT with the unified BaseDeepModel interface.
     Produces QuantileForecastResult output.
 
+    Exogenous variable support:
+        - futr_exog: Supported.
+        - hist_exog: Supported. TFT's Variable Selection Network compresses
+          historical features into encoder hidden state, so hist-only variables
+          can be used without future values.
+
     Loss selection (via hyperparameter dict):
         loss_type (str): "quantile" (default), "distribution", "implicit_quantile"
         distribution (str): For loss_type="distribution". Default: "StudentT"
@@ -51,6 +57,8 @@ class TFTForecaster(BaseDeepModel):
         >>> result = model.predict()
         >>> result.to_distribution(6).ppf(0.9)
     """
+
+    SUPPORTS_HIST_EXOG = True
 
     def _create_model(self) -> TFT:
         hp = dict(self._model_hp)

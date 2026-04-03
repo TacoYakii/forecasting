@@ -7,6 +7,16 @@ past context, producing probabilistic predictions.
 
 Default: DistributionLoss("StudentT"). Configurable via loss_type hyperparameter.
 
+Exogenous variable support:
+    - futr_exog: Supported. Future-known covariates (NWP forecasts etc.) are
+      fed into the decoder at each autoregressive step.
+    - hist_exog: NOT supported. DeepAR's pure autoregressive decoder requires
+      covariate values at every future step. Historical-only variables have no
+      future values, so they cannot participate in the decoding process.
+      NeuralForecast enforces this via EXOGENOUS_HIST = False.
+      Use TFT if hist_exog is needed (TFT has a Variable Selection Network
+      that compresses historical features into encoder hidden state).
+
 Reference:
     Salinas et al., "DeepAR: Probabilistic Forecasting with Autoregressive
     Recurrent Networks", International Journal of Forecasting, 2020.
@@ -55,9 +65,10 @@ class DeepARForecaster(BaseDeepModel):
     def _create_model(self) -> DeepAR:
         hp = dict(self._model_hp)
 
-        # Build exogenous feature lists (futr/hist split)
+        # Build exogenous feature lists
+        # hist_exog always None — DeepAR doesn't support it (SUPPORTS_HIST_EXOG=False)
+        # fit() already strips hist_cols with a warning if provided
         futr_exog = self.futr_cols or None
-        hist_exog = self.hist_cols or None
 
         loss, valid_loss = self._create_loss(
             default_loss_type="distribution",
@@ -75,7 +86,7 @@ class DeepARForecaster(BaseDeepModel):
             early_stop_patience_steps=self._early_stop,
             scaler_type=self._scaler_type,
             futr_exog_list=futr_exog,
-            hist_exog_list=hist_exog,
+            hist_exog_list=None,
             # Model architecture params
             lstm_n_layers=hp.pop("lstm_n_layers", 2),
             lstm_hidden_size=hp.pop("lstm_hidden_size", 128),
