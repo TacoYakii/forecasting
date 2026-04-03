@@ -36,7 +36,7 @@ class BaseForecaster(ABC):
     Does not provide:
     - Directory management (Runner's save_dir handles this)
     - Logging (use tqdm + warnings.warn)
-    - ModelConfig (runner_config.yaml handles metadata)
+    - Model metadata (runner_config.yaml handles this)
     - Dataset (received via fit())
 
     Args:
@@ -140,8 +140,8 @@ class DeterministicForecaster(BaseForecaster):
     ):
         hp = dict(hyperparameter) if hyperparameter else {}
 
-        self.previous_period = int(hp.pop("previous_period", 24))
-        self.distribution = hp.pop("distribution", "normal")
+        self.previous_period = int(hp.get("previous_period", 24))
+        self.distribution = hp.get("distribution", "normal")
 
         if self.distribution not in DISTRIBUTION_REGISTRY:
             raise ValueError(
@@ -149,13 +149,16 @@ class DeterministicForecaster(BaseForecaster):
                 f"Available: {list(DISTRIBUTION_REGISTRY.keys())}"
             )
 
-        _dist_extra_keys = {"df", "c"}
+        _wrapper_keys = {"previous_period", "distribution", "df", "c"}
         self.dist_extra_params: Dict[str, Any] = {
-            k: hp.pop(k) for k in list(hp.keys()) if k in _dist_extra_keys
+            k: hp[k] for k in list(hp.keys()) if k in {"df", "c"}
+        }
+        self._model_hp: Dict[str, Any] = {
+            k: v for k, v in hp.items() if k not in _wrapper_keys
         }
 
         super().__init__(
-            hyperparameter=hp if hp else None,
+            hyperparameter=hyperparameter,
             model_name=model_name,
         )
 
@@ -225,6 +228,59 @@ class DeterministicForecaster(BaseForecaster):
             std_values.append(std_val)
 
         return np.maximum(np.array(std_values, dtype=float), 1e-3)
+
+    def _save_det_state(self, model_path: Path) -> None:
+        """Persist DeterministicForecaster state needed for get_historical_std().
+
+        Saves y_col name and the target column data so that
+        get_historical_std() works after load_model().
+
+        Args:
+            model_path: Base path without extension.
+        """
+        import json as _json
+
+        meta_path = model_path.with_suffix(".det_meta.json")
+        idx = self.dataset.index
+        index_type = "datetime" if isinstance(idx, pd.DatetimeIndex) else "generic"
+        with open(meta_path, "w") as f:
+            _json.dump({"y_col": self.y_col, "index_type": index_type}, f)
+
+        data_path = model_path.with_suffix(".det_state.npz")
+        np.savez(
+            data_path,
+            y=self.y,
+            index=np.array(idx),
+            y_series=self.dataset[self.y_col].to_numpy(),
+        )
+
+    def _load_det_state(self, model_path: Path) -> None:
+        """Restore DeterministicForecaster state for get_historical_std().
+
+        Args:
+            model_path: Base path without extension.
+        """
+        import json as _json
+
+        meta_path = model_path.with_suffix(".det_meta.json")
+        if meta_path.exists():
+            with open(meta_path) as f:
+                meta = _json.load(f)
+            self.y_col = meta["y_col"]
+
+        data_path = model_path.with_suffix(".det_state.npz")
+        if data_path.exists():
+            data = np.load(data_path, allow_pickle=True)
+            self.y = data["y"]
+            raw_index = data["index"]
+            index_type = meta.get("index_type", "datetime") if meta_path.exists() else "datetime"
+            if index_type == "datetime":
+                idx = pd.DatetimeIndex(raw_index)
+            else:
+                idx = pd.Index(raw_index)
+            self.dataset = pd.DataFrame(
+                {self.y_col: data["y_series"]}, index=idx,
+            )
 
     def build_forecast_result(self, mu: np.ndarray, target_index: pd.Index):
         """Build a ParametricForecastResult from predicted mu and historical std.

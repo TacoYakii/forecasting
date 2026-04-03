@@ -65,7 +65,7 @@ class GBForecaster(DeterministicForecaster):
             hyperparameter=hyperparameter,
             model_name=model_name,
         )
-        self.model = GBModel(self.hyperparameter)
+        self.model = GBModel(self._model_hp)
 
     def fit(self, dataset: pd.DataFrame, y_col: Union[str, int],
             exog_cols=None) -> 'GBForecaster':
@@ -116,8 +116,10 @@ class GBForecaster(DeterministicForecaster):
         Note:
             Official documentation: https://scikit-learn.org/stable/model_persistence.html
         """
-        self.model.save(model_path.with_suffix(".joblib")) 
+        self.model.save(model_path.with_suffix(".joblib"))
+        self._save_det_state(model_path)
         return model_path
-    
+
     def _load_model_specific(self, model_path: Path) -> None:
         self.model.load(model_path.with_suffix(".joblib"))
+        self._load_det_state(model_path)

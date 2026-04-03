@@ -77,6 +77,12 @@ class BaseDeepModel(BaseForecaster):
     Extends BaseForecaster to wrap NeuralForecast models while producing
     QuantileForecastResult output compatible with the existing ParametricForecastResult API.
 
+    Subclass flags:
+        SUPPORTS_HIST_EXOG (bool): Whether the model supports hist_exog.
+            Default False. Subclasses that support hist_exog (e.g., TFT)
+            set this to True. If False, hist_cols passed to fit() are
+            silently ignored with a warning.
+
     This class handles:
     1. DataFrame -> NeuralForecast format conversion (unique_id, ds, y + exog)
     2. NeuralForecast wrapper creation and training
@@ -106,6 +112,8 @@ class BaseDeepModel(BaseForecaster):
         >>> result = model.forecast()        # -> QuantileForecastResult
         >>> result.to_distribution(6).ppf(0.9)  # 90th percentile at 6-step-ahead
     """
+
+    SUPPORTS_HIST_EXOG: bool = False
 
     def __init__(
         self,
@@ -262,6 +270,18 @@ class BaseDeepModel(BaseForecaster):
         self.dataset = dataset.sort_index()
         self.y_col = y_col
         self.futr_cols = list(futr_cols) if futr_cols else []
+
+        # Check hist_exog support
+        if hist_cols and not self.SUPPORTS_HIST_EXOG:
+            import warnings
+            warnings.warn(
+                f"{self.nm} does not support hist_cols={hist_cols}. "
+                f"Ignoring hist_cols. Use a model with SUPPORTS_HIST_EXOG=True "
+                f"(e.g., TFT) if historical exogenous variables are needed.",
+                stacklevel=2,
+            )
+            hist_cols = None
+
         self.hist_cols = list(hist_cols) if hist_cols else []
 
         self.y = self.dataset[y_col].to_numpy()
@@ -314,6 +334,14 @@ class BaseDeepModel(BaseForecaster):
         if self._nf is None:
             raise RuntimeError("Model not trained. Call fit() first.")
 
+        if self.futr_cols:
+            if future_X is None or future_index is None:
+                raise ValueError(
+                    f"Model was trained with futr_cols={self.futr_cols}, "
+                    f"but future_X or future_index is None. "
+                    f"Provide future exogenous data for the forecast horizon."
+                )
+
         futr_df = None
         if future_X is not None and future_index is not None and self.futr_cols:
             futr_dict = {"unique_id": _SERIES_ID, "ds": future_index}
@@ -333,7 +361,7 @@ class BaseDeepModel(BaseForecaster):
         context_y: np.ndarray,
         horizon: int,
         *,
-        context_index: Optional[pd.DatetimeIndex] = None,
+        context_index: pd.DatetimeIndex,
         context_X: Optional[np.ndarray] = None,
         future_X: Optional[np.ndarray] = None,
         future_index: Optional[pd.DatetimeIndex] = None,
@@ -343,7 +371,7 @@ class BaseDeepModel(BaseForecaster):
         Args:
             context_y: Target values for context window, shape (context_len,).
             horizon: Number of steps to forecast.
-            context_index: Time index for context window (keyword-only).
+            context_index: Time index for context window (keyword-only, required).
             context_X: Exogenous features for context, shape (context_len, n_features) (keyword-only).
             future_X: Exogenous features for forecast horizon, shape (horizon, n_features) (keyword-only).
             future_index: Time index for future period (keyword-only).
@@ -353,6 +381,14 @@ class BaseDeepModel(BaseForecaster):
         """
         if self._nf is None:
             raise RuntimeError("Model not trained. Call fit() first.")
+
+        if self.futr_cols:
+            if future_X is None or future_index is None:
+                raise ValueError(
+                    f"Model was trained with futr_cols={self.futr_cols}, "
+                    f"but future_X or future_index is None. "
+                    f"Provide future exogenous data for the forecast horizon."
+                )
 
         # Build NeuralForecast context DataFrame
         # context_X contains futr_cols + hist_cols (in that order)
@@ -537,31 +573,61 @@ class BaseDeepModel(BaseForecaster):
     def _save_model_specific(self, model_path: Path) -> Path:
         """Save model via NeuralForecast serialization.
 
+        Also saves futr_cols/hist_cols so they can be restored on load.
+
         Args:
             model_path: Base path without extension.
 
         Returns:
             Path: Directory where the model was saved.
         """
+        import json as _json
+
         sv_dir = model_path.with_suffix(".nf")
         if self._nf is not None:
             self._nf.save(
                 path=str(sv_dir),
                 overwrite=True,
             )
+
+        # Persist futr/hist cols and resolved loss type alongside the NF checkpoint
+        cols_path = model_path.with_suffix(".deep_cols.json")
+        meta = {
+            "futr_cols": self.futr_cols,
+            "hist_cols": self.hist_cols,
+            "_resolved_loss_type": getattr(self, "_resolved_loss_type", None),
+        }
+        with open(cols_path, "w") as f:
+            _json.dump(meta, f)
+
         return sv_dir
 
     def _load_model_specific(self, model_path: Path) -> None:
         """Load model from NeuralForecast serialization.
 
+        Also restores futr_cols/hist_cols if saved alongside the checkpoint.
+
         Args:
             model_path: Base path without extension.
         """
+        import json as _json
+
         sv_dir = model_path.with_suffix(".nf")
         if not sv_dir.exists():
             raise FileNotFoundError(f"NeuralForecast model directory not found: {sv_dir}")
 
         self._nf = NeuralForecast.load(path=str(sv_dir))
+
+        # Restore futr/hist cols
+        cols_path = model_path.with_suffix(".deep_cols.json")
+        if cols_path.exists():
+            with open(cols_path) as f:
+                cols = _json.load(f)
+            self.futr_cols = cols.get("futr_cols", [])
+            self.hist_cols = cols.get("hist_cols", [])
+            resolved = cols.get("_resolved_loss_type")
+            if resolved is not None:
+                self._resolved_loss_type = resolved
 
     # ------------------------------------------------------------------
     # Abstract methods for subclasses

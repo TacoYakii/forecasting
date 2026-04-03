@@ -133,6 +133,9 @@ class BaseFoundationModel(BaseForecaster):
         self._pipeline = None  # pretrained model/pipeline (set by _load_pretrained)
         self._freq: Optional[str] = None
 
+        # Initialize exog_cols for load_model() compatibility
+        self.exog_cols: List[str] = []
+
         super().__init__(
             hyperparameter=hyperparameter,
             model_name=model_name,
@@ -259,7 +262,7 @@ class BaseFoundationModel(BaseForecaster):
         context_X: Optional[np.ndarray] = None,
         future_X: Optional[np.ndarray] = None,
         future_index: Optional[pd.DatetimeIndex] = None,
-    ) -> SampleForecastResult:
+    ) -> Union[SampleForecastResult, QuantileForecastResult]:
         """Single-step prediction from a context window.
 
         Args:
@@ -271,7 +274,8 @@ class BaseFoundationModel(BaseForecaster):
             future_index: Time index for future period (keyword-only).
 
         Returns:
-            SampleForecastResult with shape (1, n_samples, horizon).
+            SampleForecastResult (output_type="samples") or
+            QuantileForecastResult (output_type="quantiles").
         """
         if self._pipeline is None:
             raise RuntimeError("Model not loaded. Call fit() first.")
@@ -285,9 +289,15 @@ class BaseFoundationModel(BaseForecaster):
         samples = self._predict_samples(context_y, horizon, context_X)
         # samples shape: (n_samples, horizon)
 
+        stacked = samples[np.newaxis, ...]  # (1, n_samples, horizon)
+        basis_index = pd.Index([0])  # placeholder
+
+        if self._output_type == "quantiles":
+            return self._samples_to_quantile_result(stacked, basis_index)
+
         return SampleForecastResult(
-            samples=samples[np.newaxis, ...],  # (1, n_samples, horizon)
-            basis_index=pd.Index([0]),  # placeholder
+            samples=stacked,
+            basis_index=basis_index,
             model_name=self.nm,
         )
 
@@ -379,6 +389,8 @@ class BaseFoundationModel(BaseForecaster):
         self._n_samples = state["n_samples"]
         self._device = state.get("device", self._device)
         self._fine_tune = state.get("fine_tune", False)
+        self._output_type = state.get("output_type", "samples")
+        self._level = state.get("level", [80, 90])
 
         self._load_pretrained()
 

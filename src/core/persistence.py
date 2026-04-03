@@ -169,10 +169,7 @@ def _load_per_horizon_models(
 
 
 def _create_model_instance(model_cls, hp: dict, display_name: str | None):
-    """Create a model instance, adapting to the current BaseForecaster interface.
-
-    Tries the new-style constructor (hyperparameter + model_name only) first,
-    then falls back to the current-style constructor that requires dataset.
+    """Create a model instance with the BaseForecaster interface.
 
     Args:
         model_cls: The model class to instantiate.
@@ -185,28 +182,7 @@ def _create_model_instance(model_cls, hp: dict, display_name: str | None):
     Example:
         >>> model = _create_model_instance(XGBoostForecaster, {"n_estimators": 100}, None)
     """
-    import inspect
-
-    sig = inspect.signature(model_cls.__init__)
-    params = sig.parameters
-
-    # New-style: __init__(self, hyperparameter=..., model_name=...)
-    if "dataset" not in params:
-        kwargs = {"hyperparameter": hp}
-        if display_name is not None:
-            kwargs["model_name"] = display_name
-        return model_cls(**kwargs)
-
-    # Current-style: needs dataset. Create a minimal dummy for loading.
-    # The model will have its internal state overwritten by _load_model_specific().
-    import pandas as pd
-    dummy_df = pd.DataFrame({"_dummy": [0.0]}, index=pd.DatetimeIndex(["2000-01-01"]))
-    kwargs = {
-        "dataset": dummy_df,
-        "y_col": "_dummy",
-        "hyperparameter": hp,
-        "enable_logging": False,
-    }
-    if display_name is not None and "model_name" in params:
+    kwargs = {"hyperparameter": hp}
+    if display_name is not None:
         kwargs["model_name"] = display_name
     return model_cls(**kwargs)

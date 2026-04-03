@@ -221,25 +221,47 @@ class PGBMForecaster(BaseForecaster):
         )
     
     def _save_model_specific(self, model_path: Path) -> Path:
-        """
-        Save PGBM model using PGBM native format.
-        
+        """Save PGBM model and forecast distribution name.
+
         Args:
-            model_path: Base path without extension for saving the model
-            
+            model_path: Base path without extension for saving the model.
+
         Returns:
-            Path: Complete path to the saved model file with .pt extension
-            
+            Path: Complete path to the saved model file with .pt extension.
+
         Note:
             Official documentation: https://pgbm.readthedocs.io/en/latest/function_reference.html#pgbm.torch.PGBM.train
         """
-        sv_path = model_path.with_suffix(".pt") 
+        import json as _json
+
+        sv_path = model_path.with_suffix(".pt")
         self.model.save(file=sv_path)
+
+        # Persist the (possibly auto-selected) forecast distribution name
+        meta_path = model_path.with_suffix(".pgbm_meta.json")
+        with open(meta_path, "w") as f:
+            _json.dump({"forecast_dist_name": self._forecast_dist_name}, f)
+
         return sv_path
-    
+
     def _load_model_specific(self, model_path: Path, device="cpu") -> None:
+        """Load PGBM model and restore forecast distribution name.
+
+        Args:
+            model_path: Base path without extension.
+            device: Device string for torch. Default: "cpu".
+        """
+        import json as _json
+
         self.model.load(
             file=model_path.with_suffix(".pt"),
-            device=device
+            device=device,
         )
+
+        # Restore the forecast distribution name
+        meta_path = model_path.with_suffix(".pgbm_meta.json")
+        if meta_path.exists():
+            with open(meta_path) as f:
+                meta = _json.load(f)
+            self._forecast_dist_name = meta.get("forecast_dist_name")
         return

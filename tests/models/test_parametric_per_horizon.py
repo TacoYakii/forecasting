@@ -18,6 +18,21 @@ from src.core.forecast_distribution import ParametricDistribution
 
 from .conftest import Y_COL, EXOG_COLS, TRAIN_END, FORECAST_START, FORECAST_END
 
+# Trigger MODEL_REGISTRY registration
+import importlib as _il
+for _mod in [
+    "src.models.machine_learning.lr_model",
+    "src.models.machine_learning.xgboost_model",
+    "src.models.machine_learning.catboost_model",
+    "src.models.machine_learning.gboost_model",
+    "src.models.machine_learning.ngboost_model",
+    "src.models.machine_learning.pgboost_model",
+]:
+    try:
+        _il.import_module(_mod)
+    except Exception:
+        pass
+
 
 # ======================================================================
 # Individual model: fit → forecast → ParametricForecastResult

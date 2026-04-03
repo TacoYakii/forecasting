@@ -64,7 +64,7 @@ class LRForecaster(DeterministicForecaster):
             hyperparameter=hyperparameter,
             model_name=model_name,
         )
-        self.model = LRModel(self.hyperparameter)
+        self.model = LRModel(self._model_hp)
 
     def fit(self, dataset: pd.DataFrame, y_col: Union[str, int],
             exog_cols=None) -> 'LRForecaster':
@@ -117,9 +117,11 @@ class LRForecaster(DeterministicForecaster):
         Note:
             Official documentation: https://scikit-learn.org/stable/model_persistence.html
         """
-        sv_path = model_path.with_suffix(".joblib") 
+        sv_path = model_path.with_suffix(".joblib")
         joblib.dump(self.model, sv_path)
-        return sv_path 
-    
+        self._save_det_state(model_path)
+        return sv_path
+
     def _load_model_specific(self, model_path: Path) -> None:
         self.model = joblib.load(model_path.with_suffix(".joblib"))
+        self._load_det_state(model_path)

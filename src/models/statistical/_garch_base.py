@@ -813,6 +813,7 @@ class GarchBase(BaseForecaster):
             "residuals":          self._residuals,
             "sigma2":             self._sigma2,
             "df":                 self._df,
+            "index":              getattr(self, "index", None),
         }
         state.update(self._get_state_dict())
         with open(sv_path, "wb") as f:
@@ -822,10 +823,19 @@ class GarchBase(BaseForecaster):
     def _load_model_specific(self, model_path: Path) -> None:
         with open(model_path.with_suffix(".pkl"), "rb") as f:
             state = pickle.load(f)
+
+        # Initialize mean primitive if not already set (e.g. loading without fit)
+        if self._mean_prim is None:
+            x_aligned = state.get("x_aligned", np.array([]))
+            n_exog = x_aligned.shape[1] if x_aligned.ndim == 2 else 0
+            self._init_mean_primitive(n_exog)
+
         self._garch.garch_coefficients = state["garch_coefficients"]
         self._y_diff = state["y_diff"]
         self._x_aligned = state["x_aligned"]
         self._residuals = state["residuals"]
         self._sigma2 = state["sigma2"]
         self._df = state.get("df")
+        if "index" in state and state["index"] is not None:
+            self.index = state["index"]
         self._load_state_dict(state)

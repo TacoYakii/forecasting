@@ -40,6 +40,15 @@ if TYPE_CHECKING:
     from .forecast_results import QuantileForecastResult, SampleForecastResult
 
 
+def _to_yaml_safe(obj):
+    """Recursively convert Python types to YAML-safe equivalents (tuples -> lists)."""
+    if isinstance(obj, dict):
+        return {k: _to_yaml_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_yaml_safe(v) for v in obj]
+    return obj
+
+
 # ======================================================================
 # RollingRunner -- time-series rolling evaluation
 # ======================================================================
@@ -258,87 +267,89 @@ class RollingRunner:
         prev_level = pl_logger.level
         pl_logger.setLevel(logging.ERROR)
 
-        kwargs = dict(method_kwargs) if method_kwargs else {}
-        forecast_times = self._forecast_data.index
-        n_total = len(forecast_times)
+        try:
+            kwargs = dict(method_kwargs) if method_kwargs else {}
+            forecast_times = self._forecast_data.index
+            n_total = len(forecast_times)
 
-        # Determine exog column sets:
-        # - Deep models use futr_cols/hist_cols (split)
-        # - Foundation/other models use exog_cols (unified)
-        has_futr = len(self._futr_cols) > 0
-        has_hist = len(self._hist_cols) > 0
-        has_exog = len(self._exog_cols) > 0
+            # Determine exog column sets:
+            # - Deep models use futr_cols/hist_cols (split)
+            # - Foundation/other models use exog_cols (unified)
+            has_futr = len(self._futr_cols) > 0
+            has_hist = len(self._hist_cols) > 0
+            has_exog = len(self._exog_cols) > 0
 
-        # Conditional truncation for models with exog
-        any_exog = has_futr or has_exog
-        if any_exog:
-            n_valid = n_total - (horizon - 1)
-            if n_valid <= 0:
-                raise ValueError(
-                    f"Forecast period has {n_total} steps but horizon={horizon} "
-                    f"requires at least {horizon} steps with exog variables."
+            # Conditional truncation: only when future exog is needed
+            # has_futr = Deep models need future_X for horizon window
+            # has_exog alone = Foundation models use context-only exog, no truncation needed
+            if has_futr:
+                n_valid = n_total - (horizon - 1)
+                if n_valid <= 0:
+                    raise ValueError(
+                        f"Forecast period has {n_total} steps but horizon={horizon} "
+                        f"requires at least {horizon} steps with exog variables."
+                    )
+                warnings.warn(
+                    f"Forecast period has {n_total} steps, last {horizon - 1} steps "
+                    f"excluded (insufficient exog horizon). Running {n_valid} steps.",
+                    stacklevel=2,
                 )
-            warnings.warn(
-                f"Forecast period has {n_total} steps, last {horizon - 1} steps "
-                f"excluded (insufficient exog horizon). Running {n_valid} steps.",
-                stacklevel=2,
+            else:
+                n_valid = n_total
+
+            idx = self._dataset.index
+            freq = pd.infer_freq(idx) or "h" if isinstance(idx, pd.DatetimeIndex) else "h"
+
+            results = []
+            iterator = tqdm(
+                range(n_valid), desc="Rolling predict", disable=not show_progress,
             )
-        else:
-            n_valid = n_total
+            for t in iterator:
+                current_time = forecast_times[t]
 
-        idx = self._dataset.index
-        freq = pd.infer_freq(idx) or "h" if isinstance(idx, pd.DatetimeIndex) else "h"
+                context_data = self._dataset.loc[:current_time].iloc[:-1]
+                if len(context_data) == 0:
+                    context_data = self._dataset.loc[:current_time]
 
-        results = []
-        iterator = tqdm(
-            range(n_valid), desc="Rolling predict", disable=not show_progress,
-        )
-        for t in iterator:
-            current_time = forecast_times[t]
+                context_y = context_data[self._y_col].to_numpy()
+                context_index = context_data.index
 
-            context_data = self._dataset.loc[:current_time].iloc[:-1]
-            if len(context_data) == 0:
-                context_data = self._dataset.loc[:current_time]
+                # Build context_X and future_X based on futr/hist split or exog_cols
+                context_X = None
+                future_X = None
+                future_index = None
 
-            context_y = context_data[self._y_col].to_numpy()
-            context_index = context_data.index
+                if has_futr or has_hist:
+                    # Deep model path: futr_cols + hist_cols
+                    all_context_cols = self._futr_cols + self._hist_cols
+                    if all_context_cols:
+                        context_X = context_data[all_context_cols].to_numpy()
 
-            # Build context_X and future_X based on futr/hist split or exog_cols
-            context_X = None
-            future_X = None
-            future_index = None
+                    if has_futr:
+                        futr_start = t + 1
+                        futr_end = min(t + 1 + horizon, n_total)
+                        futr_data = self._forecast_data.iloc[futr_start:futr_end]
 
-            if has_futr or has_hist:
-                # Deep model path: futr_cols + hist_cols
-                all_context_cols = self._futr_cols + self._hist_cols
-                if all_context_cols:
-                    context_X = context_data[all_context_cols].to_numpy()
+                        # Only futr_cols go into future_X (no hist leakage)
+                        future_X = futr_data[self._futr_cols].to_numpy()[:horizon]
+                        future_index = futr_data.index[:horizon]
 
-                if has_futr:
-                    futr_start = t + 1
-                    futr_end = min(t + 1 + horizon, n_total)
-                    futr_data = self._forecast_data.iloc[futr_start:futr_end]
+                elif has_exog:
+                    # Foundation/other model path: exog_cols unified (context only)
+                    context_X = context_data[self._exog_cols].to_numpy()
 
-                    # Only futr_cols go into future_X (no hist leakage)
-                    future_X = futr_data[self._futr_cols].to_numpy()[:horizon]
-                    future_index = futr_data.index[:horizon]
-
-            elif has_exog:
-                # Foundation/other model path: exog_cols unified (context only)
-                context_X = context_data[self._exog_cols].to_numpy()
-
-            output = model.predict_from_context(
-                context_y=context_y,
-                horizon=horizon,
-                context_index=context_index,
-                context_X=context_X,
-                future_X=future_X,
-                future_index=future_index,
-                **kwargs,
-            )
-            results.append(output)
-
-        pl_logger.setLevel(prev_level)
+                output = model.predict_from_context(
+                    context_y=context_y,
+                    horizon=horizon,
+                    context_index=context_index,
+                    context_X=context_X,
+                    future_X=future_X,
+                    future_index=future_index,
+                    **kwargs,
+                )
+                results.append(output)
+        finally:
+            pl_logger.setLevel(prev_level)
 
         basis_index = pd.Index(forecast_times[:n_valid])
         return self._collect_results(results, basis_index, horizon)
@@ -445,9 +456,8 @@ class RollingRunner:
             "runner_type": "RollingRunner",
             # Load-relevant
             "registry_key": registry_key,
-            "hyperparameter": getattr(model, "hyperparameter", {}),
-            "model_name": getattr(model, "_subclass_nm", None)
-            or getattr(model, "nm", None),
+            "hyperparameter": _to_yaml_safe(getattr(model, "hyperparameter", {})),
+            "model_name": getattr(model, "_model_name", None),
             # Experiment record
             "y_col": self._y_col,
             "exog_cols": self._exog_cols if self._exog_cols else None,
@@ -533,9 +543,9 @@ class PerHorizonRunner:
         data_dir: Union[str, Path],
         registry_key: str,
         y_col: str,
+        training_period: Tuple,
+        forecast_period: Tuple,
         exog_cols: Optional[List[str]] = None,
-        training_period: Optional[Tuple] = None,
-        forecast_period: Optional[Tuple] = None,
         hyperparameter: Optional[Dict] = None,
         horizons: Optional[List[int]] = None,
         dist_name: str = "normal",
@@ -548,6 +558,15 @@ class PerHorizonRunner:
         self.model_name = model_name
         self.y_col = y_col
         self.exog_cols = exog_cols
+
+        if training_period is None or len(training_period) < 2:
+            raise ValueError(
+                "training_period is required and must be a (start, end) tuple."
+            )
+        if forecast_period is None or len(forecast_period) < 2:
+            raise ValueError(
+                "forecast_period is required and must be a (start, end) tuple."
+            )
         self.training_period = training_period
         self.forecast_period = forecast_period
         self.model_hyperparameter = dict(hyperparameter) if hyperparameter else {}
@@ -614,7 +633,6 @@ class PerHorizonRunner:
 
     def _fit_single_horizon(self, h: int) -> Tuple[int, BaseForecaster, pd.DataFrame]:
         """Train a single horizon model. Returns (h, fitted_model, full_df)."""
-        import inspect
         from src.core.registry import MODEL_REGISTRY
 
         df = self._load_dataset(h)
@@ -622,44 +640,18 @@ class PerHorizonRunner:
 
         train_df = df.loc[self.training_period[0]:self.training_period[1]]
 
-        # Build constructor kwargs, adapting to both current and new interfaces
-        sig = inspect.signature(model_cls.__init__)
-        params = sig.parameters
-
-        if "dataset" in params:
-            # Current-style: dataset in __init__
-            kwargs: dict = {
-                "dataset": train_df,
-                "y_col": self.y_col,
-                "exog_cols": self.exog_cols,
-                "hyperparameter": dict(self.model_hyperparameter),
-                "enable_logging": False,
-                "save_dir": str(
-                    self._save_dir / "model" / f"horizon_{h}"
-                ) if self._save_dir else None,
-                "verbose": False,
-            }
-            if self.model_name is not None and "model_name" in params:
-                kwargs["model_name"] = self.model_name
-        else:
-            # New-style: dataset in fit()
-            kwargs = {
-                "hyperparameter": dict(self.model_hyperparameter),
-            }
-            if self.model_name is not None and "model_name" in params:
-                kwargs["model_name"] = self.model_name
+        kwargs: dict = {
+            "hyperparameter": dict(self.model_hyperparameter),
+        }
+        if self.model_name is not None:
+            kwargs["model_name"] = self.model_name
 
         model = model_cls(**kwargs)
-
-        # Call fit() — adapts to both old and new signatures
-        if "dataset" not in params:
-            model.fit(
-                dataset=train_df,
-                y_col=self.y_col,
-                exog_cols=self.exog_cols,
-            )
-        else:
-            model.fit()
+        model.fit(
+            dataset=train_df,
+            y_col=self.y_col,
+            exog_cols=self.exog_cols,
+        )
 
         return h, model, df
 
@@ -738,9 +730,27 @@ class PerHorizonRunner:
                 stacklevel=2,
             )
 
-        # Collect param keys from the first result
+        # Collect param keys from the first result and derive dist_name
         first_fp = horizon_results[self._horizons[0]][0]
+        derived_dist_name = first_fp.dist_name
         param_keys = list(first_fp.params.keys())
+
+        # Validate all horizons have matching dist_name and param keys
+        for h in self._horizons[1:]:
+            fp_h = horizon_results[h][0]
+            if fp_h.dist_name != derived_dist_name:
+                raise ValueError(
+                    f"Inconsistent dist_name across horizons: "
+                    f"horizon {self._horizons[0]} has '{derived_dist_name}', "
+                    f"horizon {h} has '{fp_h.dist_name}'."
+                )
+            if list(fp_h.params.keys()) != param_keys:
+                raise ValueError(
+                    f"Inconsistent param keys across horizons: "
+                    f"horizon {self._horizons[0]} has {param_keys}, "
+                    f"horizon {h} has {list(fp_h.params.keys())}."
+                )
+
         H = len(self._horizons)
         N = len(common_idx)
 
@@ -759,7 +769,7 @@ class PerHorizonRunner:
         # Get model_name from any horizon's result
         first_result = next(iter(horizon_results.values()))[0]
         result = ParametricForecastResult(
-            dist_name=self.dist_name,
+            dist_name=derived_dist_name,
             params=params_matrices,
             basis_index=common_idx,
             model_name=first_result.model_name,
@@ -844,7 +854,7 @@ class PerHorizonRunner:
             "runner_type": "PerHorizonRunner",
             # Load-relevant
             "registry_key": self.registry_key,
-            "hyperparameter": self.model_hyperparameter,
+            "hyperparameter": _to_yaml_safe(self.model_hyperparameter),
             "horizons": self._horizons,
             "model_name": self.model_name,
             # Experiment record
@@ -853,11 +863,11 @@ class PerHorizonRunner:
             "training_period": [
                 str(self.training_period[0]),
                 str(self.training_period[1]),
-            ] if self.training_period else None,
+            ],
             "forecast_period": [
                 str(self.forecast_period[0]),
                 str(self.forecast_period[1]),
-            ] if self.forecast_period else None,
+            ],
             "dist_name": self.dist_name,
             "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -868,17 +878,3 @@ class PerHorizonRunner:
             yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
         return config_path
-
-    # ------------------------------------------------------------------
-    # Legacy compatibility — delegate BaseModel attributes
-    # ------------------------------------------------------------------
-
-    @property
-    def base_dir(self) -> Optional[Path]:
-        """Legacy compat: return save_dir as base_dir."""
-        return self._save_dir
-
-    @property
-    def enable_logging(self) -> bool:
-        """Legacy compat: always False."""
-        return False

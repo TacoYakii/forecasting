@@ -67,7 +67,7 @@ class XGBoostForecaster(DeterministicForecaster):
             hyperparameter=hyperparameter,
             model_name=model_name,
         )
-        self.model = XGBoostModel(self.hyperparameter)
+        self.model = XGBoostModel(self._model_hp)
 
     def fit(self, dataset: pd.DataFrame, y_col: Union[str, int],
             exog_cols=None) -> 'XGBoostForecaster':
@@ -122,8 +122,9 @@ class XGBoostForecaster(DeterministicForecaster):
             Official documentation: https://xgboost.readthedocs.io/en/latest/tutorials/saving_model.html
         """
         self.model.save(model_path.with_suffix(".json"))
+        self._save_det_state(model_path)
         return model_path
-    
+
     def _load_model_specific(self, model_path: Path) -> None:
         self.model.load(model_path.with_suffix(".json"))
-        return 
+        self._load_det_state(model_path)

@@ -138,23 +138,25 @@ class BaseForecastRunner:
         # Create model with training data only
         model_class = MODEL_REGISTRY.get(model_name)
         model = model_class(
-            dataset=train_data,
-            y_col=self.config.y_col,
-            exog_cols=exog_cols,
             hyperparameter=self.config.model_configurations[model_name],
+            model_name=model_name,
         )
 
         # Fit and predict
-        model.fit()
+        model.fit(
+            dataset=train_data,
+            y_col=self.config.y_col,
+            exog_cols=exog_cols,
+        )
         forecast_X = forecast_data[model.exog_cols].to_numpy()
         forecast_dist = model.forecast(forecast_X, forecast_data.index)
-        
+
         # Create output directory
         output_file = model_dir / rel_path
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Save model
-        model.save_model(output_file.parent / f"model_{rel_path.stem}")
+        model._save_model_specific(output_file.parent / f"model_{rel_path.stem}")
         
         # 1. Save forecast as CSV
         forecast_df = forecast_dist.to_dataframe()

@@ -638,9 +638,11 @@ def _save_forecast_result(result: BaseForecastResult, path: Path) -> Path:
     idx_df.to_csv(path / "basis_index.csv", index=False)
 
     # Build metadata
+    index_type = "datetime" if isinstance(result.basis_index, pd.DatetimeIndex) else "generic"
     metadata: dict = {
         "result_type": type(result).__name__,
         "model_name": result.model_name,
+        "index_type": index_type,
     }
 
     if isinstance(result, ParametricForecastResult):
@@ -703,8 +705,13 @@ def load_forecast_result(path: Union[str, Path]) -> BaseForecastResult:
     model_name = metadata.get("model_name", "")
 
     # Load basis_index
-    idx_df = pd.read_csv(path / "basis_index.csv", parse_dates=["basis_time"])
-    basis_index = pd.DatetimeIndex(idx_df["basis_time"])
+    index_type = metadata.get("index_type", "datetime")
+    if index_type == "datetime":
+        idx_df = pd.read_csv(path / "basis_index.csv", parse_dates=["basis_time"])
+        basis_index = pd.DatetimeIndex(idx_df["basis_time"])
+    else:
+        idx_df = pd.read_csv(path / "basis_index.csv")
+        basis_index = pd.Index(idx_df["basis_time"])
 
     if result_type == "ParametricForecastResult":
         data = np.load(path / "params.npz")
