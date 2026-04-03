@@ -192,20 +192,11 @@ class TestStatisticalExog:
     def test_arima_garch_futr_only(self, exog_df, exog_train_df, exog_forecast_df, tmp_path):
         """ARIMA-GARCH trained with futr_exog only, forecast with x_future."""
         from src.models.statistical.arima_garch import ArimaGarchForecaster
-        from src.models.statistical.config import ArimaGarchConfig
 
-        config = ArimaGarchConfig(
-            arima_order=(1, 0, 1), garch_order=(1, 1), distribution="normal",
-        )
-        model = ArimaGarchForecaster(
-            dataset=exog_train_df,
-            y_col=Y_COL,
-            exog_cols=FUTR_COLS,
-            config=config,
-            enable_logging=False,
-            save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = ArimaGarchForecaster(hyperparameter={
+            "arima_order": (1, 0, 1), "garch_order": (1, 1), "distribution": "normal",
+        })
+        model.fit(dataset=exog_train_df, y_col=Y_COL, exog_cols=FUTR_COLS)
         assert model.is_fitted_
 
         x_future = exog_forecast_df[FUTR_COLS].to_numpy()[:HORIZON]
@@ -230,20 +221,11 @@ class TestStatisticalExog:
     def test_arima_garch_update_state_with_exog(self, exog_train_df, exog_forecast_df, tmp_path):
         """update_state with current exog, then forecast with future exog."""
         from src.models.statistical.arima_garch import ArimaGarchForecaster
-        from src.models.statistical.config import ArimaGarchConfig
 
-        config = ArimaGarchConfig(
-            arima_order=(1, 0, 1), garch_order=(1, 1), distribution="normal",
-        )
-        model = ArimaGarchForecaster(
-            dataset=exog_train_df,
-            y_col=Y_COL,
-            exog_cols=FUTR_COLS,
-            config=config,
-            enable_logging=False,
-            save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = ArimaGarchForecaster(hyperparameter={
+            "arima_order": (1, 0, 1), "garch_order": (1, 1), "distribution": "normal",
+        })
+        model.fit(dataset=exog_train_df, y_col=Y_COL, exog_cols=FUTR_COLS)
 
         y_new = exog_forecast_df[Y_COL].iloc[0]
         x_new = exog_forecast_df[FUTR_COLS].iloc[0].to_numpy()
@@ -257,19 +239,11 @@ class TestStatisticalExog:
     def test_arima_garch_exog_shape(self, exog_train_df, tmp_path):
         """Verify model stores correct number of exog features."""
         from src.models.statistical.arima_garch import ArimaGarchForecaster
-        from src.models.statistical.config import ArimaGarchConfig
 
-        config = ArimaGarchConfig(
-            arima_order=(1, 0, 1), garch_order=(1, 1), distribution="normal",
-        )
-        model = ArimaGarchForecaster(
-            dataset=exog_train_df,
-            y_col=Y_COL,
-            exog_cols=FUTR_COLS,
-            config=config,
-            enable_logging=False,
-            save_dir=str(tmp_path),
-        )
+        model = ArimaGarchForecaster(hyperparameter={
+            "arima_order": (1, 0, 1), "garch_order": (1, 1), "distribution": "normal",
+        })
+        model.fit(dataset=exog_train_df, y_col=Y_COL, exog_cols=FUTR_COLS)
 
         assert model.exog_cols == FUTR_COLS
         assert model.X.shape[1] == len(FUTR_COLS)
@@ -288,17 +262,11 @@ class TestMLExog:
 
     def test_fit_forecast_with_exog(self, model_name, exog_df, exog_train_df, exog_forecast_df, tmp_path):
         """ML model trained with all exog, forecast with same columns."""
-        from src.models.machine_learning.registry import MODEL_REGISTRY
+        from src.core.registry import MODEL_REGISTRY
 
         model_cls = MODEL_REGISTRY.get(model_name)
-        model = model_cls(
-            dataset=exog_train_df,
-            y_col=Y_COL,
-            exog_cols=EXOG_COLS,
-            enable_logging=False,
-            save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = model_cls()
+        model.fit(dataset=exog_train_df, y_col=Y_COL, exog_cols=EXOG_COLS)
         assert model.is_fitted_
 
         forecast_X = exog_forecast_df[EXOG_COLS].to_numpy()
@@ -329,21 +297,15 @@ class TestMLExog:
         from src.models.machine_learning.lr_model import LRForecaster
 
         # futr only
-        model_futr = LRForecaster(
-            dataset=exog_train_df, y_col=Y_COL, exog_cols=FUTR_COLS,
-            enable_logging=False, save_dir=str(tmp_path / "futr"),
-        )
-        model_futr.fit()
+        model_futr = LRForecaster()
+        model_futr.fit(dataset=exog_train_df, y_col=Y_COL, exog_cols=FUTR_COLS)
         result_futr = model_futr.forecast(
             exog_forecast_df[FUTR_COLS].to_numpy(), exog_forecast_df.index,
         )
 
         # futr + hist
-        model_all = LRForecaster(
-            dataset=exog_train_df, y_col=Y_COL, exog_cols=EXOG_COLS,
-            enable_logging=False, save_dir=str(tmp_path / "all"),
-        )
-        model_all.fit()
+        model_all = LRForecaster()
+        model_all.fit(dataset=exog_train_df, y_col=Y_COL, exog_cols=EXOG_COLS)
         result_all = model_all.forecast(
             exog_forecast_df[EXOG_COLS].to_numpy(), exog_forecast_df.index,
         )
@@ -378,13 +340,8 @@ class TestMLExog:
         """ML model stores exog_cols correctly."""
         from src.models.machine_learning.lr_model import LRForecaster
 
-        model = LRForecaster(
-            dataset=exog_train_df,
-            y_col=Y_COL,
-            exog_cols=EXOG_COLS,
-            enable_logging=False,
-            save_dir=str(tmp_path),
-        )
+        model = LRForecaster()
+        model.fit(dataset=exog_train_df, y_col=Y_COL, exog_cols=EXOG_COLS)
 
         assert model.exog_cols == EXOG_COLS
         assert model.X.shape[1] == len(EXOG_COLS)
@@ -410,15 +367,9 @@ class TestDeepExog:
         from src.models.deep_time_series.deepar import DeepARForecaster
 
         hp = {**self._FAST_HP, "loss_type": "distribution", "distribution": "Normal"}
-        model = DeepARForecaster(
-            dataset=exog_train_df,
-            y_col=Y_COL,
-            futr_cols=FUTR_COLS,
-            hist_cols=HIST_COLS,
-            hyperparameter=hp,
-            enable_logging=False,
-            save_dir=str(tmp_path),
-        )
+        model = DeepARForecaster(hyperparameter=hp)
+        model.fit(dataset=exog_train_df, y_col=Y_COL,
+                  futr_cols=FUTR_COLS, hist_cols=HIST_COLS)
 
         assert model.futr_cols == FUTR_COLS
         assert model.hist_cols == HIST_COLS
@@ -429,16 +380,9 @@ class TestDeepExog:
         from src.models.deep_time_series.deepar import DeepARForecaster
 
         hp = {**self._FAST_HP, "loss_type": "distribution", "distribution": "Normal"}
-        model = DeepARForecaster(
-            dataset=exog_train_df,
-            y_col=Y_COL,
-            futr_cols=FUTR_COLS,
-            hist_cols=HIST_COLS,
-            hyperparameter=hp,
-            enable_logging=False,
-            save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = DeepARForecaster(hyperparameter=hp)
+        model.fit(dataset=exog_train_df, y_col=Y_COL,
+                  futr_cols=FUTR_COLS, hist_cols=HIST_COLS)
         assert model.is_fitted_
 
         future_df = exog_full_df.loc[FORECAST_START:]
@@ -471,16 +415,9 @@ class TestDeepExog:
         from src.models.deep_time_series.deepar import DeepARForecaster
 
         hp = {**self._FAST_HP, "loss_type": "distribution", "distribution": "Normal"}
-        model = DeepARForecaster(
-            dataset=exog_train_df,
-            y_col=Y_COL,
-            futr_cols=FUTR_COLS,
-            hist_cols=HIST_COLS,
-            hyperparameter=hp,
-            enable_logging=False,
-            save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = DeepARForecaster(hyperparameter=hp)
+        model.fit(dataset=exog_train_df, y_col=Y_COL,
+                  futr_cols=FUTR_COLS, hist_cols=HIST_COLS)
 
         context_data = exog_full_df.loc[:TRAIN_END]
         context_y = context_data[Y_COL].to_numpy()
@@ -523,15 +460,8 @@ class TestDeepExog:
         from src.models.deep_time_series.deepar import DeepARForecaster
 
         hp = {**self._FAST_HP, "loss_type": "distribution", "distribution": "Normal"}
-        model = DeepARForecaster(
-            dataset=exog_train_df,
-            y_col=Y_COL,
-            futr_cols=FUTR_COLS,
-            hyperparameter=hp,
-            enable_logging=False,
-            save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = DeepARForecaster(hyperparameter=hp)
+        model.fit(dataset=exog_train_df, y_col=Y_COL, futr_cols=FUTR_COLS)
 
         future_df = exog_full_df.loc[FORECAST_START:]
         future_X = future_df[FUTR_COLS].to_numpy()[:HORIZON]

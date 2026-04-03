@@ -8,105 +8,120 @@ from src.core.base_model import BaseForecaster
 from src.core.forecast_results import ParametricForecastResult
 from src.core.registry import MODEL_REGISTRY
 
-class CatBoostModel: 
+
+class CatBoostModel:
     def __init__(
-        self, 
-        hyperparameter=None 
-    ): 
+        self,
+        hyperparameter=None
+    ):
         self.hyperparameter = {
             "loss_function": "RMSEWithUncertainty",
-            "posterior_sampling": True, 
+            "posterior_sampling": True,
             "silent": True,
             "allow_writing_files": False,
         }
         if hyperparameter:
-            self.hyperparameter.update(**hyperparameter) 
+            self.hyperparameter.update(**hyperparameter)
         self.model = CatBoostRegressor(
             **self.hyperparameter,
-        ) 
-    
-    def fit(self, train_X: np.ndarray, train_y: np.ndarray) -> 'CatBoostModel': 
+        )
+
+    def fit(self, train_X: np.ndarray, train_y: np.ndarray) -> 'CatBoostModel':
         self.model.fit(
-            X=train_X, 
-            y=train_y 
-        ) 
-        return self 
-    
+            X=train_X,
+            y=train_y
+        )
+        return self
+
     def predict(self, X: np.ndarray):
-        """
-        Returns:
-            Tuple[np.ndarray, np.ndarray]: (mu, std) of shape (T,) each.
-            std is derived from total uncertainty (knowledge + data).
+        """Return (mu, std) of shape (T,) each.
+
+        std is derived from total uncertainty (knowledge + data).
         """
         forecast = self.model.virtual_ensembles_predict(
-            data=X, 
-            prediction_type="TotalUncertainty", 
-            verbose=False 
+            data=X,
+            prediction_type="TotalUncertainty",
+            verbose=False
         )
-        mu = forecast[:, 0] 
-        knowledge_uncertainty = forecast[:, 1] 
-        data_uncertainty = forecast[:, 2] 
-        total_uncertainty = knowledge_uncertainty + data_uncertainty 
-        std = np.sqrt(np.maximum(total_uncertainty, 0)) 
-        
-        return mu, std  
-    
-    def save(self, file): 
+        mu = forecast[:, 0]
+        knowledge_uncertainty = forecast[:, 1]
+        data_uncertainty = forecast[:, 2]
+        total_uncertainty = knowledge_uncertainty + data_uncertainty
+        std = np.sqrt(np.maximum(total_uncertainty, 0))
+
+        return mu, std
+
+    def save(self, file):
         self.model.save_model(
             fname=file,
             format="cbm"
         )
-        
-    def load(self, file): 
+
+    def load(self, file):
         self.model.load_model(
             fname=file,
             format="cbm"
         )
-        
+
 
 @MODEL_REGISTRY.register_model(name="catboost")
 class CatBoostForecaster(BaseForecaster):
-    """
-    CatBoost-based probabilistic forecaster.
-    
+    """CatBoost-based probabilistic forecaster.
+
     Uses CatBoost's RMSEWithUncertainty loss with posterior sampling to estimate
     both knowledge and data uncertainty. The combined total uncertainty is used
     as the standard deviation of a Normal distribution.
-    
+
     forecast() returns a ParametricDistribution with dist_name="normal".
+
+    Example:
+        >>> model = CatBoostForecaster(hyperparameter={...})
+        >>> model.fit(dataset=train_df, y_col="power", exog_cols=["wind_speed"])
+        >>> result = model.forecast(X=test_X, target_index=test_idx)
     """
     def __init__(
         self,
-        dataset: pd.DataFrame,
-        y_col: Union[str, int],
-        exog_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
         hyperparameter: Optional[Dict] = None,
-        enable_logging: bool = False,
-        save_dir: Optional[str] = None,
-        verbose: bool = False,
         model_name: Optional[str] = None,
-        ):
-
+    ):
         super().__init__(
-            dataset,
-            y_col,
-            exog_cols,
-            hyperparameter,
-            enable_logging,
-            save_dir,
-            verbose,
+            hyperparameter=hyperparameter,
             model_name=model_name,
         )
-
         self.model = CatBoostModel(hyperparameter)
-        
-    def fit(self) -> 'CatBoostForecaster':
+
+    def fit(self, dataset: pd.DataFrame, y_col: Union[str, int],
+            exog_cols=None) -> 'CatBoostForecaster':
+        """Train CatBoost on the provided dataset.
+
+        Args:
+            dataset: Training DataFrame.
+            y_col: Target column name.
+            exog_cols: Feature columns. None -> all except y_col.
+
+        Returns:
+            Self for method chaining.
+        """
+        dataset = dataset.sort_index()
+        self.y_col = y_col
+        if exog_cols is not None:
+            if isinstance(exog_cols, (str, int)):
+                self.exog_cols = [exog_cols]
+            else:
+                self.exog_cols = list(exog_cols)
+        else:
+            self.exog_cols = [c for c in dataset.columns if c != y_col]
+
+        self.y = dataset[y_col].to_numpy()
+        self.X = dataset[self.exog_cols].to_numpy()
+        self.index = dataset.index
+
         self.model.fit(
             train_X=self.X,
             train_y=self.y,
-        ) 
+        )
         self.is_fitted_ = True
-        
+
         return self
     
     def forecast(self, X: np.ndarray, target_index: pd.Index) -> ParametricForecastResult:

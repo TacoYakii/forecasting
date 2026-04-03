@@ -27,37 +27,34 @@ HORIZON = 6
 # Helpers
 # ======================================================================
 
-def _make_config(model_key: str):
-    """Create a minimal config for a GARCH-family model."""
+def _make_hp(model_key: str) -> dict:
+    """Create a minimal hyperparameter dict for a GARCH-family model."""
     if model_key == "arima_garch":
-        from src.models.statistical.config import ArimaGarchConfig
-        return ArimaGarchConfig(
-            arima_order=(1, 0, 1),
-            garch_order=(1, 1),
-            distribution="normal",
-        )
+        return {
+            "arima_order": (1, 0, 1),
+            "garch_order": (1, 1),
+            "distribution": "normal",
+        }
     elif model_key == "sarima_garch":
-        from src.models.statistical.config import SarimaGarchConfig
-        return SarimaGarchConfig(
-            arima_order=(1, 0, 1),
-            seasonal_order=(1, 0, 1, 24),
-            garch_order=(1, 1),
-            distribution="normal",
-        )
+        return {
+            "arima_order": (1, 0, 1),
+            "seasonal_order": (1, 0, 1, 24),
+            "garch_order": (1, 1),
+            "distribution": "normal",
+        }
     elif model_key == "arfima_garch":
-        from src.models.statistical.config import ArfimaGarchConfig
-        return ArfimaGarchConfig(
-            arfima_order=(1, 1),
-            garch_order=(1, 1),
-            distribution="normal",
-            truncation_K=100,
-        )
+        return {
+            "arfima_order": (1, 1),
+            "garch_order": (1, 1),
+            "distribution": "normal",
+            "truncation_K": 100,
+        }
     raise ValueError(f"Unknown model key: {model_key}")
 
 
 def _make_model(model_key: str, train_df, tmp_path, exog_cols=None):
-    """Instantiate a GARCH-family model."""
-    config = _make_config(model_key)
+    """Instantiate a GARCH-family model (unfitted)."""
+    hp = _make_hp(model_key)
 
     if model_key == "arima_garch":
         from src.models.statistical.arima_garch import ArimaGarchForecaster
@@ -71,14 +68,7 @@ def _make_model(model_key: str, train_df, tmp_path, exog_cols=None):
     else:
         raise ValueError(f"Unknown model key: {model_key}")
 
-    return cls(
-        dataset=train_df,
-        y_col=Y_COL,
-        exog_cols=exog_cols,
-        config=config,
-        enable_logging=False,
-        save_dir=str(tmp_path),
-    )
+    return cls(hyperparameter=hp)
 
 
 # ======================================================================
@@ -95,7 +85,7 @@ class TestGarchForecasters:
     def test_fit_forecast_e2e(self, model_key, train_df, tmp_path):
         """fit → forecast(horizon) → ParametricForecastResult (1, H)."""
         model = _make_model(model_key, train_df, tmp_path)
-        model.fit()
+        model.fit(dataset=train_df, y_col=Y_COL)
         assert model.is_fitted_
 
         result = model.forecast(horizon=HORIZON)
@@ -110,7 +100,7 @@ class TestGarchForecasters:
     def test_to_distribution(self, train_df, tmp_path):
         """to_distribution(h) returns ParametricDistribution."""
         model = _make_model("arima_garch", train_df, tmp_path)
-        model.fit()
+        model.fit(dataset=train_df, y_col=Y_COL)
         result = model.forecast(horizon=HORIZON)
 
         for h in range(1, HORIZON + 1):
@@ -120,7 +110,7 @@ class TestGarchForecasters:
     def test_update_state(self, train_df, forecast_df, tmp_path):
         """update_state advances internal state without error."""
         model = _make_model("arima_garch", train_df, tmp_path)
-        model.fit()
+        model.fit(dataset=train_df, y_col=Y_COL)
 
         y_actual = forecast_df[Y_COL].iloc[0]
         model.update_state(y_actual)
@@ -133,18 +123,13 @@ class TestGarchForecasters:
     def test_student_t_distribution(self, train_df, tmp_path):
         """Student-t distribution produces 3-param result (loc, scale, df)."""
         from src.models.statistical.arima_garch import ArimaGarchForecaster
-        from src.models.statistical.config import ArimaGarchConfig
 
-        config = ArimaGarchConfig(
-            arima_order=(1, 0, 1),
-            garch_order=(1, 1),
-            distribution="studentT",
-        )
-        model = ArimaGarchForecaster(
-            dataset=train_df, y_col=Y_COL,
-            config=config, enable_logging=False, save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = ArimaGarchForecaster(hyperparameter={
+            "arima_order": (1, 0, 1),
+            "garch_order": (1, 1),
+            "distribution": "studentT",
+        })
+        model.fit(dataset=train_df, y_col=Y_COL)
         result = model.forecast(horizon=HORIZON)
 
         assert result.dist_name == "studentT"
@@ -162,7 +147,7 @@ class TestSimulatePaths:
     def test_simulate_paths_e2e(self, train_df, tmp_path):
         """simulate_paths → SampleForecastResult (1, n_paths, H)."""
         model = _make_model("arima_garch", train_df, tmp_path)
-        model.fit()
+        model.fit(dataset=train_df, y_col=Y_COL)
 
         n_paths = 50
         result = model.simulate_paths(n_paths=n_paths, horizon=HORIZON, seed=42)
@@ -192,7 +177,7 @@ class TestRollingRunner:
         # Train on data up to TRAIN_END
         train_df = full_df.loc[:TRAIN_END]
         model = _make_model("arima_garch", train_df, tmp_path)
-        model.fit()
+        model.fit(dataset=train_df, y_col=Y_COL)
 
         runner = RollingRunner(
             model=model,
@@ -220,7 +205,7 @@ class TestRollingRunner:
 
         train_df = full_df.loc[:TRAIN_END]
         model = _make_model("arima_garch", train_df, tmp_path)
-        model.fit()
+        model.fit(dataset=train_df, y_col=Y_COL)
 
         # Use a short forecast period for speed
         short_end = pd.Timestamp(FORECAST_START) + pd.Timedelta(hours=5)

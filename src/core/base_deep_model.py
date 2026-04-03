@@ -6,15 +6,15 @@ NeuralForecast-based deep learning models (DeepAR, TFT, NHITS, PatchTST, etc.)
 while producing QuantileForecastResult output.
 
 Key responsibilities:
-- DataFrame → NeuralForecast format conversion (unique_id, ds, y)
+- DataFrame -> NeuralForecast format conversion (unique_id, ds, y)
 - NeuralForecast wrapper creation, training, and prediction
-- Quantile output → QuantileForecastResult conversion
+- Quantile output -> QuantileForecastResult conversion
 - Model save/load via NeuralForecast.save() / .load()
 
 NeuralForecast core pattern:
     nf = NeuralForecast(models=[model], freq=freq)
     nf.fit(df=train_df)
-    forecast_df = nf.predict()  → DataFrame with quantile columns
+    forecast_df = nf.predict()  -> DataFrame with quantile columns
 """
 
 import numpy as np
@@ -49,11 +49,11 @@ _DEFAULT_DEEP_HP = {
     "prediction_length": 48,        # forecast horizon h
     "max_steps": 1000,              # training steps
     "batch_size": 32,
-    "windows_batch_size": 128,          # sliding windows per GPU batch (NF default 1024 — too large for many exog)
+    "windows_batch_size": 128,          # sliding windows per GPU batch (NF default 1024 -- too large for many exog)
     "learning_rate": 0.001,
     "early_stop_patience_steps": -1,  # -1 = disabled
     "val_size": 0,                  # validation set size (number of timesteps)
-    "level": list(range(2, 100, 2)),  # confidence levels → 99 quantiles (0.01, ..., 0.99)
+    "level": list(range(2, 100, 2)),  # confidence levels -> 99 quantiles (0.01, ..., 0.99)
     "scaler_type": "robust",        # NeuralForecast internal scaler
     "loss_type": None,              # "distribution" | "quantile" | "implicit_quantile" (None = subclass default)
     "distribution": None,           # for loss_type="distribution": "StudentT", "Normal", etc.
@@ -72,16 +72,15 @@ def _resolve_device() -> str:
 
 
 class BaseDeepModel(BaseForecaster):
-    """
-    Base class for NeuralForecast deep learning forecasting models.
+    """Base class for NeuralForecast deep learning forecasting models.
 
     Extends BaseForecaster to wrap NeuralForecast models while producing
     QuantileForecastResult output compatible with the existing ParametricForecastResult API.
 
     This class handles:
-    1. DataFrame → NeuralForecast format conversion (unique_id, ds, y + exog)
+    1. DataFrame -> NeuralForecast format conversion (unique_id, ds, y + exog)
     2. NeuralForecast wrapper creation and training
-    3. Quantile forecast output → QuantileForecastResult conversion
+    3. Quantile forecast output -> QuantileForecastResult conversion
     4. Model save/load via NeuralForecast serialization
 
     Subclasses only need to implement:
@@ -95,35 +94,24 @@ class BaseDeepModel(BaseForecaster):
         learning_rate (float): Learning rate. Default: 0.001
         early_stop_patience_steps (int): Early stopping patience. -1 = disabled.
         val_size (int): Validation set size in timesteps. Default: 0
-        level (list[int]): Confidence levels for quantile output. Default: range(2, 100, 2) → 99 quantiles
+        level (list[int]): Confidence levels for quantile output. Default: range(2, 100, 2) -> 99 quantiles
         scaler_type (str): NeuralForecast internal scaler. Default: "robust"
 
     Example:
         >>> model = DeepARForecaster(
-        ...     dataset=df, y_col="power",
         ...     hyperparameter={"input_size": 168, "prediction_length": 48}
         ... )
-        >>> model.fit()
-        >>> result = model.forecast()        # → QuantileForecastResult
+        >>> model.fit(dataset=df, y_col="power",
+        ...           futr_cols=["nwp_wspd"], hist_cols=["obs_wspd"])
+        >>> result = model.forecast()        # -> QuantileForecastResult
         >>> result.to_distribution(6).ppf(0.9)  # 90th percentile at 6-step-ahead
     """
 
     def __init__(
         self,
-        dataset: pd.DataFrame,
-        y_col: Union[str, int],
-        futr_cols: Optional[List[str]] = None,
-        hist_cols: Optional[List[str]] = None,
         hyperparameter: Optional[Dict] = None,
-        enable_logging: bool = False,
-        save_dir: Optional[str] = None,
-        verbose: bool = False,
         model_name: Optional[str] = None,
     ):
-        # Store futr/hist split for NeuralForecast
-        self.futr_cols: List[str] = list(futr_cols) if futr_cols else []
-        self.hist_cols: List[str] = list(hist_cols) if hist_cols else []
-
         # Merge user hyperparameters with defaults
         self._deep_hp = dict(_DEFAULT_DEEP_HP)
         if hyperparameter:
@@ -146,47 +134,31 @@ class BaseDeepModel(BaseForecaster):
         # Store remaining model-specific hyperparameters for subclasses
         self._model_hp = dict(self._deep_hp)
 
-        # Store verbose for NeuralForecast fit/predict
-        self.verbose: bool = verbose
-
         # Internal state
         self._nf: Optional[NeuralForecast] = None  # NeuralForecast wrapper
         self._freq: Optional[str] = None            # inferred from dataset index
 
-        # Call parent with combined exog_cols
+        # futr/hist cols (set in fit)
+        self.futr_cols: List[str] = []
+        self.hist_cols: List[str] = []
+
+        # verbose for NeuralForecast fit/predict (default False)
+        self.verbose: bool = False
+
         super().__init__(
-            dataset=dataset,
-            y_col=y_col,
-            exog_cols=self.futr_cols + self.hist_cols or None,
-            hyperparameter=hyperparameter,  # store original for info.json
-            enable_logging=enable_logging,
-            save_dir=save_dir,
-            verbose=verbose,
+            hyperparameter=hyperparameter,
             model_name=model_name,
         )
 
     # ------------------------------------------------------------------
-    # Dataset conversion
+    # Loss creation
     # ------------------------------------------------------------------
-
-    def prepare_dataset(self) -> None:
-        """Override parent to also infer frequency from the dataset index."""
-        super().prepare_dataset()
-        self._infer_freq()
 
     def _create_loss(self, default_loss_type: str = "distribution",
                      default_distribution: str = "StudentT"):
-        """
-        Create loss and valid_loss based on loss_type hyperparameter.
+        """Create loss and valid_loss based on loss_type hyperparameter.
 
         Subclasses call this in _create_model() with their own defaults.
-        The user can override via hyperparameters:
-            loss_type="distribution"        → DistributionLoss (parametric)
-            loss_type="quantile"            → MQLoss (non-parametric, fixed quantiles)
-            loss_type="implicit_quantile"   → IQLoss (non-parametric, continuous)
-
-        NeuralForecast requires valid_loss to match the training loss type
-        (e.g. MQLoss training requires MQLoss valid_loss).
 
         Args:
             default_loss_type: Subclass default if user doesn't specify.
@@ -218,9 +190,13 @@ class BaseDeepModel(BaseForecaster):
                 f"Available: {list(_LOSS_TYPES)}"
             )
 
-    def _infer_freq(self) -> None:
+    # ------------------------------------------------------------------
+    # Dataset conversion
+    # ------------------------------------------------------------------
+
+    def _infer_freq(self, dataset: pd.DataFrame) -> None:
         """Infer time series frequency from the dataset index."""
-        idx = self.dataset.index
+        idx = dataset.index
         if isinstance(idx, pd.DatetimeIndex):
             self._freq = pd.infer_freq(idx)
             if self._freq is None:
@@ -230,17 +206,18 @@ class BaseDeepModel(BaseForecaster):
         else:
             self._freq = "h"  # default fallback
 
-    def _build_nf_dataframe(self) -> pd.DataFrame:
-        """
-        Convert the internal DataFrame into NeuralForecast format.
+    def _build_nf_dataframe(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        """Convert a DataFrame into NeuralForecast format.
 
         NeuralForecast requires columns: [unique_id, ds, y, ...exogenous].
-        Builds from the full dataset (which is the training data).
+
+        Args:
+            dataset: Training DataFrame with time index.
 
         Returns:
             DataFrame with NeuralForecast-compatible columns.
         """
-        dataset = self.dataset.copy().sort_index()
+        dataset = dataset.sort_index()
 
         # Build NeuralForecast DataFrame
         data = {
@@ -250,39 +227,52 @@ class BaseDeepModel(BaseForecaster):
         }
 
         # Add exogenous features
-        feat_cols = self._get_feature_cols(dataset)
+        feat_cols = self.futr_cols + self.hist_cols
         for col in feat_cols:
             data[col] = dataset[col].values
 
         nf_df = pd.DataFrame(data).reset_index(drop=True)
         return nf_df
 
-    def _get_feature_cols(self, df: pd.DataFrame) -> List[str]:
-        """Get all exogenous feature column names (futr + hist)."""
-        return self.futr_cols + self.hist_cols
-
     # ------------------------------------------------------------------
     # Fit
     # ------------------------------------------------------------------
 
-    def fit(self) -> Self:
-        """
-        Train the deep learning model via NeuralForecast.
+    def fit(
+        self,
+        dataset: pd.DataFrame,
+        y_col: Union[str, int],
+        futr_cols: Optional[List[str]] = None,
+        hist_cols: Optional[List[str]] = None,
+    ) -> Self:
+        """Train the deep learning model via NeuralForecast.
 
         Creates the model (from subclass), wraps in NeuralForecast, and
         trains on the training period data.
 
+        Args:
+            dataset: Training DataFrame with a proper time index.
+            y_col: Target column name.
+            futr_cols: Future-known exogenous columns (NWP forecasts etc.).
+            hist_cols: Historical-only exogenous columns (SCADA obs etc.).
+
         Returns:
             Self: The fitted model instance for method chaining.
         """
-        train_df = self._build_nf_dataframe()
-        model = self._create_model()
+        self.dataset = dataset.sort_index()
+        self.y_col = y_col
+        self.futr_cols = list(futr_cols) if futr_cols else []
+        self.hist_cols = list(hist_cols) if hist_cols else []
 
-        if self.enable_logging:
-            self.logger.info(
-                f"Training {self.nm} with input_size={self._input_size}, "
-                f"h={self._prediction_length}, max_steps={self._max_steps}"
-            )
+        self.y = self.dataset[y_col].to_numpy()
+        self.exog_cols = self.futr_cols + self.hist_cols
+        self.X = self.dataset[self.exog_cols].to_numpy() if self.exog_cols else np.empty((len(self.y), 0))
+        self.index = self.dataset.index
+
+        self._infer_freq(self.dataset)
+
+        train_df = self._build_nf_dataframe(self.dataset)
+        model = self._create_model()
 
         self._nf = NeuralForecast(
             models=[model],
@@ -296,9 +286,6 @@ class BaseDeepModel(BaseForecaster):
 
         self.is_fitted_ = True
 
-        if self.enable_logging:
-            self.logger.info("Training complete.")
-
         return self
 
     # ------------------------------------------------------------------
@@ -310,8 +297,7 @@ class BaseDeepModel(BaseForecaster):
         future_X: Optional[np.ndarray] = None,
         future_index: Optional[pd.DatetimeIndex] = None,
     ) -> Union[ParametricForecastResult, QuantileForecastResult]:
-        """
-        Generate probabilistic forecast.
+        """Generate probabilistic forecast.
 
         Uses the full training dataset as context and calls NeuralForecast.predict().
 
@@ -345,22 +331,22 @@ class BaseDeepModel(BaseForecaster):
     def predict_from_context(
         self,
         context_y: np.ndarray,
-        context_index: pd.DatetimeIndex,
         horizon: int,
+        *,
+        context_index: Optional[pd.DatetimeIndex] = None,
         context_X: Optional[np.ndarray] = None,
         future_X: Optional[np.ndarray] = None,
         future_index: Optional[pd.DatetimeIndex] = None,
     ) -> Union[ParametricForecastResult, QuantileForecastResult]:
-        """
-        Single-step prediction from a context window.
+        """Single-step prediction from a context window.
 
         Args:
             context_y: Target values for context window, shape (context_len,).
-            context_index: Time index for context window.
             horizon: Number of steps to forecast.
-            context_X: Exogenous features for context, shape (context_len, n_features).
-            future_X: Exogenous features for forecast horizon, shape (horizon, n_features).
-            future_index: Time index for future period.
+            context_index: Time index for context window (keyword-only).
+            context_X: Exogenous features for context, shape (context_len, n_features) (keyword-only).
+            future_X: Exogenous features for forecast horizon, shape (horizon, n_features) (keyword-only).
+            future_index: Time index for future period (keyword-only).
 
         Returns:
             ParametricForecastResult (DistributionLoss) or QuantileForecastResult (MQLoss/IQLoss).
@@ -382,7 +368,7 @@ class BaseDeepModel(BaseForecaster):
                 context_df[col] = context_X[:, i]
         context_df = context_df.reset_index(drop=True)
 
-        # Build future exog DataFrame (futr_cols only — no hist leakage)
+        # Build future exog DataFrame (futr_cols only -- no hist leakage)
         futr_df = None
         if future_X is not None and future_index is not None and self.futr_cols:
             futr_dict = {"unique_id": _SERIES_ID, "ds": future_index}
@@ -401,15 +387,11 @@ class BaseDeepModel(BaseForecaster):
     def _convert_forecast(
         self, forecast_df: pd.DataFrame,
     ) -> Union[ParametricForecastResult, QuantileForecastResult]:
-        """
-        Convert NeuralForecast output DataFrame to a ForecastResult.
+        """Convert NeuralForecast output DataFrame to a ForecastResult.
 
         Dispatches by loss type:
-          - DistributionLoss → ParametricForecastResult (native params)
-          - MQLoss / IQLoss  → QuantileForecastResult (quantile arrays)
-
-        NeuralForecast returns columns like:
-            ModelName, ModelName-median, ModelName-lo-80, ModelName-hi-80, ...
+          - DistributionLoss -> ParametricForecastResult (native params)
+          - MQLoss / IQLoss  -> QuantileForecastResult (quantile arrays)
         """
         if "ds" in forecast_df.columns:
             basis_index = pd.Index([forecast_df["ds"].iloc[0]])
@@ -431,10 +413,10 @@ class BaseDeepModel(BaseForecaster):
         # --- MQLoss / IQLoss: return QuantileForecastResult ---
         return self._convert_quantile(forecast_df, model_name, basis_index, H)
 
-    # NeuralForecast distribution name → our registry name
+    # NeuralForecast distribution name -> our registry name
     _NF_DIST_MAP = {"studentt": "studentT", "normal": "normal", "poisson": "poisson"}
 
-    # NeuralForecast param suffix → our factory key, per distribution
+    # NeuralForecast param suffix -> our factory key, per distribution
     _NF_PARAM_MAP: Dict[str, Dict[str, str]] = {
         "normal":   {"-loc": "loc", "-scale": "scale"},
         "studentT": {"-df": "df", "-loc": "loc", "-scale": "scale"},
@@ -448,12 +430,7 @@ class BaseDeepModel(BaseForecaster):
         basis_index: pd.Index,
         H: int,
     ) -> ParametricForecastResult:
-        """
-        Convert DistributionLoss output (with return_params=True) to ParametricForecastResult.
-
-        Extracts native distribution parameters directly from the forecast DataFrame
-        columns (e.g. ModelName-loc, ModelName-scale, ModelName-df).
-        """
+        """Convert DistributionLoss output (with return_params=True) to ParametricForecastResult."""
         # Resolve distribution name
         dist_name = (self._distribution or "normal").lower()
         dist_name = self._NF_DIST_MAP.get(dist_name, "normal")
@@ -470,7 +447,7 @@ class BaseDeepModel(BaseForecaster):
                 has_native = True
 
         if has_native and len(params) == len(param_map):
-            # All native params found — apply safety clamps
+            # All native params found -- apply safety clamps
             if "scale" in params:
                 params["scale"] = np.maximum(params["scale"], 1e-9)
             if "df" in params:
@@ -496,7 +473,7 @@ class BaseDeepModel(BaseForecaster):
             params = {"loc": mu, "scale": sigma}
             dist_name = "normal"  # fallback to normal if params unavailable
 
-        # Reshape (H,) → (1, H) for single-origin result
+        # Reshape (H,) -> (1, H) for single-origin result
         params = {k: v.reshape(1, -1) for k, v in params.items()}
         return ParametricForecastResult(
             dist_name=dist_name,
@@ -515,7 +492,7 @@ class BaseDeepModel(BaseForecaster):
         """Convert MQLoss / IQLoss output to QuantileForecastResult."""
         quantiles_data: Dict[float, np.ndarray] = {}
 
-        # Point prediction → 0.5
+        # Point prediction -> 0.5
         if model_name in forecast_df.columns:
             quantiles_data[0.5] = forecast_df[model_name].values.reshape(1, -1)
 
@@ -558,8 +535,7 @@ class BaseDeepModel(BaseForecaster):
     # ------------------------------------------------------------------
 
     def _save_model_specific(self, model_path: Path) -> Path:
-        """
-        Save model via NeuralForecast serialization.
+        """Save model via NeuralForecast serialization.
 
         Args:
             model_path: Base path without extension.
@@ -576,8 +552,7 @@ class BaseDeepModel(BaseForecaster):
         return sv_dir
 
     def _load_model_specific(self, model_path: Path) -> None:
-        """
-        Load model from NeuralForecast serialization.
+        """Load model from NeuralForecast serialization.
 
         Args:
             model_path: Base path without extension.
@@ -594,32 +569,17 @@ class BaseDeepModel(BaseForecaster):
 
     @abstractmethod
     def _create_model(self):
-        """
-        Create and return a configured NeuralForecast model instance.
+        """Create and return a configured NeuralForecast model instance.
 
         Subclasses must implement this to return their specific model
         (e.g., DeepAR, TFT, NHITS, PatchTST).
-
-        The model should use self._input_size, self._prediction_length,
-        self._max_steps, self._batch_size, self._learning_rate,
-        self._scaler_type, and self._model_hp for configuration.
 
         Returns:
             A NeuralForecast model instance (e.g., DeepAR(h=48, ...)).
 
         Example (DeepAR subclass):
-            def _create_model(self):
-                from neuralforecast.models import DeepAR
-                from neuralforecast.losses.pytorch import DistributionLoss
-                return DeepAR(
-                    h=self._prediction_length,
-                    input_size=self._input_size,
-                    max_steps=self._max_steps,
-                    batch_size=self._batch_size,
-                    learning_rate=self._learning_rate,
-                    scaler_type=self._scaler_type,
-                    loss=DistributionLoss("StudentT", level=self._level),
-                    **self._model_hp,
-                )
+            >>> def _create_model(self):
+            ...     from neuralforecast.models import DeepAR
+            ...     return DeepAR(h=self._prediction_length, ...)
         """
         pass

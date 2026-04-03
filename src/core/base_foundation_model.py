@@ -6,15 +6,15 @@ that produce probabilistic predictions via samples or quantiles.
 
 Unlike BaseDeepModel (NeuralForecast pattern), foundation models follow a
 different lifecycle:
-    1. Load pretrained weights via from_pretrained() — no training data needed
+    1. Load pretrained weights via from_pretrained() -- no training data needed
     2. Optionally fine-tune on domain-specific data
-    3. Predict via model-specific inference API → samples or quantiles
+    3. Predict via model-specific inference API -> samples or quantiles
 
 Key responsibilities:
 - Pretrained model loading (from_pretrained / download)
 - Optional fine-tuning on training data
 - Rolling prediction over the forecast period
-- Sample → SampleForecastResult or quantile → QuantileForecastResult conversion
+- Sample -> SampleForecastResult or quantile -> QuantileForecastResult conversion
 - Model save/load (weights or pipeline serialization)
 """
 
@@ -37,8 +37,8 @@ _DEFAULT_FOUNDATION_HP = {
     "device": "auto",               # "cuda", "cpu", or "auto"
     "model_name_or_path": None,     # HuggingFace model ID or local path (REQUIRED)
     "fine_tune": False,             # whether to fine-tune on training data
-    "output_type": "samples",       # "samples" → SampleForecastResult, "quantiles" → QuantileForecastResult
-    "level": [80, 90],              # confidence levels for quantile output (e.g., 80 → q=0.1, 0.9)
+    "output_type": "samples",       # "samples" -> SampleForecastResult, "quantiles" -> QuantileForecastResult
+    "level": [80, 90],              # confidence levels for quantile output (e.g., 80 -> q=0.1, 0.9)
 }
 
 
@@ -58,9 +58,9 @@ class BaseFoundationModel(BaseForecaster):
     SampleForecastResult output compatible with the existing forecast API.
 
     Lifecycle:
-        1. __init__: Load dataset, extract hyperparameters
-        2. fit():    Load pretrained weights + optionally fine-tune
-        3. predict(): Rolling inference → SampleForecastResult
+        1. __init__: Set hyperparameters
+        2. fit():    Load dataset, load pretrained weights, optionally fine-tune
+        3. predict(): Rolling inference -> SampleForecastResult
 
     This class handles:
     1. Hyperparameter extraction (context/prediction length, device, etc.)
@@ -70,7 +70,7 @@ class BaseFoundationModel(BaseForecaster):
 
     Subclasses must implement:
     - _load_pretrained(): Load the pretrained model/pipeline
-    - _predict_samples(context, prediction_length) → np.ndarray: Run inference
+    - _predict_samples(context, prediction_length) -> np.ndarray: Run inference
 
     Subclasses may optionally implement:
     - _fine_tune(train_y, train_X): Fine-tune on training data
@@ -83,31 +83,24 @@ class BaseFoundationModel(BaseForecaster):
         distribution (str): Distribution name for SampleForecastResult. Default: "normal"
         device (str): Device for inference. Default: "auto"
         fine_tune (bool): Whether to fine-tune on training data. Default: False
-        output_type (str): "samples" → SampleForecastResult, "quantiles" → QuantileForecastResult. Default: "samples"
+        output_type (str): "samples" -> SampleForecastResult, "quantiles" -> QuantileForecastResult. Default: "samples"
         level (list[int]): Confidence levels for quantile output. Default: [80, 90]
 
     Example:
         >>> model = ChronosForecaster(
-        ...     dataset=df, y_col="power",
         ...     hyperparameter={
         ...         "model_name_or_path": "amazon/chronos-t5-large",
         ...         "prediction_length": 48,
         ...     }
         ... )
-        >>> model.fit()                      # loads pretrained weights
-        >>> result = model.forecast()        # → SampleForecastResult
+        >>> model.fit(dataset=df, y_col="power")
+        >>> result = model.forecast()        # -> SampleForecastResult
         >>> result.to_distribution(6).ppf(0.9)  # 90th percentile at 6-step-ahead
     """
 
     def __init__(
         self,
-        dataset: pd.DataFrame,
-        y_col: Union[str, int],
-        exog_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
         hyperparameter: Optional[Dict] = None,
-        enable_logging: bool = False,
-        save_dir: Optional[str] = None,
-        verbose: bool = False,
         model_name: Optional[str] = None,
     ):
         # Merge user hyperparameters with defaults
@@ -140,15 +133,8 @@ class BaseFoundationModel(BaseForecaster):
         self._pipeline = None  # pretrained model/pipeline (set by _load_pretrained)
         self._freq: Optional[str] = None
 
-        # Call parent — triggers prepare_dataset()
         super().__init__(
-            dataset=dataset,
-            y_col=y_col,
-            exog_cols=exog_cols,
             hyperparameter=hyperparameter,
-            enable_logging=enable_logging,
-            save_dir=save_dir,
-            verbose=verbose,
             model_name=model_name,
         )
 
@@ -156,14 +142,9 @@ class BaseFoundationModel(BaseForecaster):
     # Dataset preparation
     # ------------------------------------------------------------------
 
-    def prepare_dataset(self) -> None:
-        """Override parent to also infer frequency from the dataset index."""
-        super().prepare_dataset()
-        self._infer_freq()
-
-    def _infer_freq(self) -> None:
+    def _infer_freq(self, dataset: pd.DataFrame) -> None:
         """Infer time series frequency from the dataset index."""
-        idx = self.dataset.index
+        idx = dataset.index
         if isinstance(idx, pd.DatetimeIndex):
             self._freq = pd.infer_freq(idx)
             if self._freq is None:
@@ -177,34 +158,45 @@ class BaseFoundationModel(BaseForecaster):
     # Fit
     # ------------------------------------------------------------------
 
-    def fit(self) -> Self:
+    def fit(
+        self,
+        dataset: pd.DataFrame,
+        y_col: Union[str, int],
+        exog_cols=None,
+    ) -> Self:
         """Load pretrained model and optionally fine-tune.
 
-        Steps:
-            1. Call _load_pretrained() to load weights/pipeline
-            2. If fine_tune=True, call _fine_tune() with training data
+        Args:
+            dataset: Training DataFrame with a proper time index.
+            y_col: Target column name.
+            exog_cols: Exogenous feature columns.
 
         Returns:
             Self: The fitted model instance for method chaining.
         """
-        if self.enable_logging:
-            self.logger.info(
-                f"Loading pretrained model: {self._model_name_or_path}"
-            )
+        self.dataset = dataset.sort_index()
+        self.y_col = y_col
+
+        if exog_cols is not None:
+            if isinstance(exog_cols, (str, int)):
+                self.exog_cols = [exog_cols]
+            else:
+                self.exog_cols = list(exog_cols)
+        else:
+            self.exog_cols = [c for c in self.dataset.columns if c != y_col]
+
+        self.y = self.dataset[y_col].to_numpy()
+        self.X = self.dataset[self.exog_cols].to_numpy() if self.exog_cols else np.empty((len(self.y), 0))
+        self.index = self.dataset.index
+
+        self._infer_freq(self.dataset)
 
         self._load_pretrained()
 
         if self._fine_tune:
-            if self.enable_logging:
-                self.logger.info("Fine-tuning on training data...")
             self._fine_tune_model()
-            if self.enable_logging:
-                self.logger.info("Fine-tuning complete.")
 
         self.is_fitted_ = True
-
-        if self.enable_logging:
-            self.logger.info(f"{self.nm} ready for prediction.")
 
         return self
 
@@ -262,10 +254,25 @@ class BaseFoundationModel(BaseForecaster):
         self,
         context_y: np.ndarray,
         horizon: int,
+        *,
+        context_index: Optional[pd.DatetimeIndex] = None,
         context_X: Optional[np.ndarray] = None,
-        **kwargs,
+        future_X: Optional[np.ndarray] = None,
+        future_index: Optional[pd.DatetimeIndex] = None,
     ) -> SampleForecastResult:
-        """Single-step prediction from a context window."""
+        """Single-step prediction from a context window.
+
+        Args:
+            context_y: Target values for context window, shape (context_len,).
+            horizon: Number of steps to forecast.
+            context_index: Time index for context window (keyword-only).
+            context_X: Context features, shape (context_len, n_features) (keyword-only).
+            future_X: Future features, shape (horizon, n_features) (keyword-only).
+            future_index: Time index for future period (keyword-only).
+
+        Returns:
+            SampleForecastResult with shape (1, n_samples, horizon).
+        """
         if self._pipeline is None:
             raise RuntimeError("Model not loaded. Call fit() first.")
 
@@ -291,8 +298,6 @@ class BaseFoundationModel(BaseForecaster):
     ) -> QuantileForecastResult:
         """Convert sample array to QuantileForecastResult.
 
-        Computes quantiles from the sample distribution at each confidence level.
-
         Args:
             samples: Shape (N_basis, n_samples, H).
             basis_index: Time index for each basis time.
@@ -305,7 +310,7 @@ class BaseFoundationModel(BaseForecaster):
         # Median
         quantiles_data[0.5] = np.median(samples, axis=1)  # (N_basis, H)
 
-        # Level-based quantiles (e.g., level=80 → q=0.1, 0.9)
+        # Level-based quantiles (e.g., level=80 -> q=0.1, 0.9)
         for lv in self._level:
             alpha = (100 - lv) / 200.0
             quantiles_data[alpha] = np.quantile(samples, alpha, axis=1)
@@ -386,15 +391,11 @@ class BaseFoundationModel(BaseForecaster):
         """Load the pretrained model/pipeline.
 
         Must set self._pipeline to the loaded model object.
-        Use self._model_name_or_path for the model identifier and
-        self._device for the target device.
 
         Example (Chronos):
-            from chronos import ChronosPipeline
-            self._pipeline = ChronosPipeline.from_pretrained(
-                self._model_name_or_path,
-                device_map=self._device,
-            )
+            >>> from chronos import ChronosPipeline
+            >>> self._pipeline = ChronosPipeline.from_pretrained(
+            ...     self._model_name_or_path, device_map=self._device)
         """
         pass
 
@@ -411,26 +412,14 @@ class BaseFoundationModel(BaseForecaster):
             context_y: Context target values, shape (context_length,).
             prediction_length: Number of steps to forecast.
             context_X: Optional context features, shape (context_length, n_features).
-                       May be None if the model doesn't support exogenous variables
-                       or if no features were specified.
 
         Returns:
             np.ndarray of shape (n_samples, prediction_length).
 
-        Note:
-            Some foundation models (e.g., Chronos) do not support exogenous
-            variables. In that case, context_X should be ignored and this
-            limitation documented in the subclass docstring.
-
         Example (Chronos):
-            import torch
-            context_tensor = torch.tensor(context_y, dtype=torch.float32)
-            samples = self._pipeline.predict(
-                context_tensor,
-                prediction_length,
-                num_samples=self._n_samples,
-            )
-            return samples.numpy()  # (n_samples, prediction_length)
+            >>> context_tensor = torch.tensor(context_y, dtype=torch.float32)
+            >>> samples = self._pipeline.predict(context_tensor, prediction_length, ...)
+            >>> return samples.numpy()
         """
         pass
 

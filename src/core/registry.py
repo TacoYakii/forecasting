@@ -53,6 +53,7 @@ class Registry:
                     f"{model_name} is already registered in {self._name}"
                 )
             self._module_dict[model_name] = cls
+            cls._registry_key = model_name
             return cls
         return _register
 

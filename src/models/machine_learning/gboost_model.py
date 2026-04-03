@@ -50,38 +50,43 @@ class GBForecaster(DeterministicForecaster):
         c (float): Shape parameter for weibull distribution. Default: 2.0.
 
     forecast() returns a ParametricDistribution with the configured distribution.
+
+    Example:
+        >>> model = GBForecaster(hyperparameter={"distribution": "normal"})
+        >>> model.fit(dataset=train_df, y_col="power", exog_cols=["wind_speed"])
+        >>> result = model.forecast(X=test_X, target_index=test_idx)
     """
     def __init__(
         self,
-        dataset: pd.DataFrame,
-        y_col: Union[str, int],
-        exog_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
         hyperparameter: Optional[Dict] = None,
-        enable_logging: bool = False,
-        save_dir: Optional[str] = None,
-        verbose: bool = False,
-        ):
-
+        model_name: Optional[str] = None,
+    ):
         super().__init__(
-            dataset,
-            y_col,
-            exog_cols,
-            hyperparameter,
-            enable_logging,
-            save_dir,
-            verbose,
+            hyperparameter=hyperparameter,
+            model_name=model_name,
         )
-                
         self.model = GBModel(self.hyperparameter)
-    
-    def fit(self) -> 'GBForecaster':
+
+    def fit(self, dataset: pd.DataFrame, y_col: Union[str, int],
+            exog_cols=None) -> 'GBForecaster':
+        """Train GradientBoosting on the provided dataset.
+
+        Args:
+            dataset: Training DataFrame.
+            y_col: Target column name.
+            exog_cols: Feature columns. None -> all except y_col.
+
+        Returns:
+            Self for method chaining.
+        """
+        super().fit(dataset, y_col, exog_cols)
         self.model.fit(
             train_X=self.X,
             train_y=self.y
         )
         self.is_fitted_ = True
-        
-        return self 
+
+        return self
     
     def forecast(self, X: np.ndarray, target_index: pd.Index):
         """Generate probabilistic forecast.

@@ -14,9 +14,10 @@ Concrete subclasses: ArimaGarchForecaster, SarimaGarchForecaster, ArfimaGarchFor
 from __future__ import annotations
 
 import pickle
+import warnings
 from abc import abstractmethod
 from pathlib import Path
-from typing import Optional, Tuple, Union, Iterable, Dict, List
+from typing import Optional, Tuple, Union, Iterable, Dict, List, Self
 
 import numpy as np
 import pandas as pd
@@ -34,9 +35,9 @@ from src.models.statistical._primitives import GARCH
 def _max_root_modulus(coeffs: np.ndarray) -> float:
     """
     Compute max |eigenvalue| of the companion matrix for the polynomial
-    1 - c₁z - c₂z² - … - cₚzᵖ.
+    1 - c_1*z - c_2*z^2 - ... - c_p*z^p.
 
-    Returns 0.0 for empty coefficients, |c₁| for p=1.
+    Returns 0.0 for empty coefficients, |c_1| for p=1.
     Stationarity / invertibility requires the return value to be < 1.
     """
     p = len(coeffs)
@@ -93,11 +94,10 @@ class GarchBase(BaseForecaster):
     """
     Abstract base for *-GARCH family models.
 
-    Implements the full pipeline (fit → forecast → update_state → simulate_paths)
+    Implements the full pipeline (fit -> forecast -> update_state -> simulate_paths)
     as template methods.  Subclasses override hooks for model-specific behaviour.
 
     Subclass contract (must implement):
-        _build_config_hyperparameter() -> dict
         _init_mean_primitive(n_exog)   -> None    (set self._mean_prim)
         _get_pq()                      -> (p, q)
         _get_diff_loss()               -> int
@@ -120,48 +120,40 @@ class GarchBase(BaseForecaster):
 
     Optional hook (default returns None):
         _apply_differencing_in_nll(y_train, params) -> np.ndarray or None
+
+    Example:
+        >>> model = ArimaGarchForecaster(hyperparameter={
+        ...     "arima_order": (2, 1, 1), "garch_order": (1, 1)
+        ... })
+        >>> model.fit(dataset=train_df, y_col="power", exog_cols=["wind_speed"])
+        >>> result = model.forecast(horizon=24)
     """
 
     _MLE_DISTRIBUTIONS = {"normal", "studentT"}
 
     def __init__(
         self,
-        dataset: pd.DataFrame,
-        y_col: Union[str, int],
-        exog_cols: Optional[Union[str, int, Iterable]] = None,
-        config=None,
-        enable_logging: bool = False,
-        save_dir: Optional[str] = None,
-        verbose: bool = False,
+        hyperparameter: Optional[Dict] = None,
         model_name: Optional[str] = None,
     ):
-        if self.config.distribution not in self._MLE_DISTRIBUTIONS:
+        # Subclass must set self._distribution, self._garch_order,
+        # self._variance_targeting, self._opt_method BEFORE calling super().__init__
+        if self._distribution not in self._MLE_DISTRIBUTIONS:
             raise ValueError(
                 f"distribution must be one of {self._MLE_DISTRIBUTIONS}, "
-                f"got '{self.config.distribution}'"
+                f"got '{self._distribution}'"
             )
 
-        hyperparameter = self._build_config_hyperparameter()
-
         super().__init__(
-            dataset=dataset,
-            y_col=y_col,
-            exog_cols=exog_cols,
             hyperparameter=hyperparameter,
-            enable_logging=enable_logging,
-            save_dir=save_dir,
-            verbose=verbose,
             model_name=model_name,
         )
 
-        n_exog = self.X.shape[1] if self.X.ndim == 2 else 0
-
-        # Mean primitive (set by subclass)
+        # Mean primitive (set by subclass in fit)
         self._mean_prim = None
-        self._init_mean_primitive(n_exog)
 
         # GARCH primitive (shared)
-        self._garch = GARCH(order=self.config.garch_order)
+        self._garch = GARCH(order=self._garch_order)
 
         # Internal state arrays (populated by fit)
         self._y_diff: np.ndarray = np.array([])
@@ -173,13 +165,8 @@ class GarchBase(BaseForecaster):
         self._df: Optional[float] = None
 
     # ------------------------------------------------------------------
-    # Abstract hooks — subclasses MUST implement
+    # Abstract hooks -- subclasses MUST implement
     # ------------------------------------------------------------------
-
-    @abstractmethod
-    def _build_config_hyperparameter(self) -> dict:
-        """Return hyperparameter dict for BaseModel.__init__."""
-        ...
 
     @abstractmethod
     def _init_mean_primitive(self, n_exog: int) -> None:
@@ -188,7 +175,7 @@ class GarchBase(BaseForecaster):
 
     @abstractmethod
     def _get_pq(self) -> Tuple[int, int]:
-        """Return (p, q) — non-seasonal AR and MA orders."""
+        """Return (p, q) -- non-seasonal AR and MA orders."""
         ...
 
     @abstractmethod
@@ -302,7 +289,7 @@ class GarchBase(BaseForecaster):
         Each entry is a list of parameter indices forming one polynomial
         whose companion-matrix eigenvalues must all have modulus < 1.
 
-        Default: [extra + AR], [MA]  — AR stationarity + MA invertibility.
+        Default: [extra + AR], [MA]  -- AR stationarity + MA invertibility.
         Override for SARIMA (4 groups) or ARFIMA (skip d).
         """
         p, q = self._get_pq()
@@ -315,13 +302,45 @@ class GarchBase(BaseForecaster):
     # Fit
     # ------------------------------------------------------------------
 
-    def fit(self) -> "GarchBase":
-        """Estimate model parameters via MLE on the training window."""
-        p, q = self._get_pq()
-        gp, gq = self.config.garch_order
+    def fit(
+        self,
+        dataset: pd.DataFrame,
+        y_col: Union[str, int],
+        exog_cols=None,
+    ) -> Self:
+        """Estimate model parameters via MLE on the training window.
+
+        Args:
+            dataset: Training DataFrame with a proper time index.
+            y_col: Target column name.
+            exog_cols: Exogenous feature columns. None -> all except y_col.
+
+        Returns:
+            Self for method chaining.
+        """
+        # Extract y, X, index from dataset
+        dataset = dataset.sort_index()
+        self.y_col = y_col
+        if exog_cols is not None:
+            if isinstance(exog_cols, (str, int)):
+                self.exog_cols = [exog_cols]
+            else:
+                self.exog_cols = list(exog_cols)
+        else:
+            self.exog_cols = [c for c in dataset.columns if c != y_col]
+
+        self.y = dataset[y_col].to_numpy()
+        self.X = dataset[self.exog_cols].to_numpy()
+        self.index = dataset.index
+
+        # Init mean primitive now that we know n_exog
         n_exog = self.X.shape[1] if self.X.ndim == 2 else 0
-        use_t = self.config.distribution == "studentT"
-        use_vt = self.config.variance_targeting
+        self._init_mean_primitive(n_exog)
+
+        p, q = self._get_pq()
+        gp, gq = self._garch_order
+        use_t = self._distribution == "studentT"
+        use_vt = self._variance_targeting
 
         # Differencing
         y_diff, x_data = self._apply_differencing(self.y, self.X)
@@ -349,7 +368,7 @@ class GarchBase(BaseForecaster):
                     coeffs[j] = float(arr[j])
 
         sample_var = float(np.var(y_diff))
-        garch_init = [0.8 / gp] * gp   # rugarch style: persistence ≈ 0.9
+        garch_init = [0.8 / gp] * gp   # rugarch style: persistence ~ 0.9
         arch_init = [0.1 / gq] * gq
 
         x_init = (list(np.linalg.lstsq(x_data, y_diff, rcond=None)[0])
@@ -404,7 +423,7 @@ class GarchBase(BaseForecaster):
 
         # --------------- Stationarity constraints (root-based, rugarch style) ---
         root_groups = self._get_root_check_groups()
-        opt_method = self.config.opt_method
+        opt_method = self._opt_method
 
         # Ensure x0 is feasible for all root-based constraints
         for idx in root_groups:
@@ -506,8 +525,8 @@ class GarchBase(BaseForecaster):
                        method=opt_method,
                        bounds=bounds_scaled, constraints=constraints)
 
-        if not res.success and self.enable_logging:
-            self.logger.warning(f"MLE did not converge: {res.message}")
+        if not res.success:
+            warnings.warn(f"MLE did not converge: {res.message}", stacklevel=2)
 
         # --------------- Store fitted state ---------------
         params = res.x * scales  # unscale
@@ -542,7 +561,7 @@ class GarchBase(BaseForecaster):
         y_diff_final = self._apply_differencing_in_nll(self.y, params)
         if y_diff_final is not None:
             self._y_diff = y_diff_final
-            # Re-align x_data if diff loss changed — for ARFIMA this is same length
+            # Re-align x_data if diff loss changed -- for ARFIMA this is same length
             diff_loss = self._get_diff_loss()
             self._x_aligned = self.X[diff_loss:] if diff_loss > 0 else self.X.copy()
         else:
@@ -616,8 +635,8 @@ class GarchBase(BaseForecaster):
         mu = self._undifference_mean(mu_diff)
         sigma = self._undifference_sigma(sigma_diff)
 
-        # Build native params — reshape to (1, H)
-        dist_name = self.config.distribution
+        # Build native params -- reshape to (1, H)
+        dist_name = self._distribution
         if dist_name == "studentT" and self._df is not None:
             df = self._df
             params = {
@@ -709,7 +728,7 @@ class GarchBase(BaseForecaster):
         n_exog = self._x_aligned.shape[1] if self._x_aligned.ndim == 2 else 0
 
         # Draw all shocks at once
-        if self.config.distribution == "studentT" and self._df is not None:
+        if self._distribution == "studentT" and self._df is not None:
             df = self._df
             raw = rng.standard_t(df, size=(n_paths, horizon))
             eta = raw * np.sqrt((df - 2.0) / df)
@@ -759,6 +778,27 @@ class GarchBase(BaseForecaster):
             basis_index=basis_index,
             model_name=self.nm,
         )
+
+    # ------------------------------------------------------------------
+    # get_params
+    # ------------------------------------------------------------------
+
+    def get_params(self) -> dict:
+        """Return fitted ARMA/GARCH coefficients.
+
+        Returns:
+            dict with 'arma' and 'garch' keys.
+
+        Example:
+            >>> model.fit(dataset=df, y_col="power")
+            >>> model.get_params()
+        """
+        if not self.is_fitted_:
+            raise RuntimeError("Call fit() before get_params().")
+        return {
+            "arma": self._mean_prim.arma_coefficients,
+            "garch": self._garch.garch_coefficients,
+        }
 
     # ------------------------------------------------------------------
     # Serialisation

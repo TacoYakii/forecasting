@@ -33,18 +33,14 @@ class TestChronosForecaster:
         """fit → forecast → SampleForecastResult (1, n_samples, H)."""
         from src.models.foundation.chronos import ChronosForecaster
 
-        model = ChronosForecaster(
-            dataset=train_df, y_col=Y_COL,
-            hyperparameter={
+        model = ChronosForecaster(hyperparameter={
                 "model_name_or_path": "amazon/chronos-t5-tiny",
                 "prediction_length": PREDICTION_LENGTH,
                 "n_samples": N_SAMPLES,
                 "context_length": 64,
                 "output_type": "samples",
-            },
-            enable_logging=False, save_dir=str(tmp_path),
-        )
-        model.fit()
+        })
+        model.fit(dataset=train_df, y_col=Y_COL)
         assert model.is_fitted_
 
         result = model.forecast()
@@ -62,18 +58,14 @@ class TestChronosForecaster:
         """output_type='quantiles' → QuantileForecastResult."""
         from src.models.foundation.chronos import ChronosForecaster
 
-        model = ChronosForecaster(
-            dataset=train_df, y_col=Y_COL,
-            hyperparameter={
+        model = ChronosForecaster(hyperparameter={
                 "model_name_or_path": "amazon/chronos-t5-tiny",
                 "prediction_length": PREDICTION_LENGTH,
                 "n_samples": N_SAMPLES,
                 "context_length": 64,
                 "output_type": "quantiles",
-            },
-            enable_logging=False, save_dir=str(tmp_path),
-        )
-        model.fit()
+        })
+        model.fit(dataset=train_df, y_col=Y_COL)
         result = model.forecast()
 
         assert isinstance(result, QuantileForecastResult)
@@ -84,17 +76,13 @@ class TestChronosForecaster:
         """to_distribution(h) returns EmpiricalDistribution from samples."""
         from src.models.foundation.chronos import ChronosForecaster
 
-        model = ChronosForecaster(
-            dataset=train_df, y_col=Y_COL,
-            hyperparameter={
+        model = ChronosForecaster(hyperparameter={
                 "model_name_or_path": "amazon/chronos-t5-tiny",
                 "prediction_length": PREDICTION_LENGTH,
                 "n_samples": N_SAMPLES,
                 "context_length": 64,
-            },
-            enable_logging=False, save_dir=str(tmp_path),
-        )
-        model.fit()
+        })
+        model.fit(dataset=train_df, y_col=Y_COL)
         result = model.forecast()
 
         dist = result.to_distribution(h=1)
@@ -104,17 +92,13 @@ class TestChronosForecaster:
         """predict_from_context → SampleForecastResult for rolling use."""
         from src.models.foundation.chronos import ChronosForecaster
 
-        model = ChronosForecaster(
-            dataset=train_df, y_col=Y_COL,
-            hyperparameter={
+        model = ChronosForecaster(hyperparameter={
                 "model_name_or_path": "amazon/chronos-t5-tiny",
                 "prediction_length": PREDICTION_LENGTH,
                 "n_samples": N_SAMPLES,
                 "context_length": 64,
-            },
-            enable_logging=False, save_dir=str(tmp_path),
-        )
-        model.fit()
+        })
+        model.fit(dataset=train_df, y_col=Y_COL)
 
         context_y = train_df[Y_COL].to_numpy()[-64:]
         result = model.predict_from_context(context_y=context_y, horizon=PREDICTION_LENGTH)
@@ -135,17 +119,13 @@ class TestMoiraiForecaster:
         """fit → forecast → SampleForecastResult (1, n_samples, H)."""
         from src.models.foundation.moirai import MoiraiForecaster
 
-        model = MoiraiForecaster(
-            dataset=train_df, y_col=Y_COL,
-            hyperparameter={
+        model = MoiraiForecaster(hyperparameter={
                 "model_name_or_path": "Salesforce/moirai-1.0-R-small",
                 "prediction_length": PREDICTION_LENGTH,
                 "n_samples": N_SAMPLES,
                 "context_length": 64,
-            },
-            enable_logging=False, save_dir=str(tmp_path),
-        )
-        model.fit()
+        })
+        model.fit(dataset=train_df, y_col=Y_COL)
         assert model.is_fitted_
 
         result = model.forecast()
@@ -158,18 +138,13 @@ class TestMoiraiForecaster:
         """Moirai with exog_cols (past covariates) produces valid result."""
         from src.models.foundation.moirai import MoiraiForecaster
 
-        model = MoiraiForecaster(
-            dataset=train_df, y_col=Y_COL,
-            exog_cols=["wind_speed"],
-            hyperparameter={
+        model = MoiraiForecaster(hyperparameter={
                 "model_name_or_path": "Salesforce/moirai-1.0-R-small",
                 "prediction_length": PREDICTION_LENGTH,
                 "n_samples": N_SAMPLES,
                 "context_length": 64,
-            },
-            enable_logging=False, save_dir=str(tmp_path),
-        )
-        model.fit()
+        })
+        model.fit(dataset=train_df, y_col=Y_COL, exog_cols=["wind_speed"])
         result = model.forecast()
 
         assert isinstance(result, SampleForecastResult)
@@ -179,18 +154,14 @@ class TestMoiraiForecaster:
         """output_type='quantiles' → QuantileForecastResult."""
         from src.models.foundation.moirai import MoiraiForecaster
 
-        model = MoiraiForecaster(
-            dataset=train_df, y_col=Y_COL,
-            hyperparameter={
+        model = MoiraiForecaster(hyperparameter={
                 "model_name_or_path": "Salesforce/moirai-1.0-R-small",
                 "prediction_length": PREDICTION_LENGTH,
                 "n_samples": N_SAMPLES,
                 "context_length": 64,
                 "output_type": "quantiles",
-            },
-            enable_logging=False, save_dir=str(tmp_path),
-        )
-        model.fit()
+        })
+        model.fit(dataset=train_df, y_col=Y_COL)
         result = model.forecast()
 
         assert isinstance(result, QuantileForecastResult)

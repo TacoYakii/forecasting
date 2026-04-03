@@ -21,15 +21,14 @@ Key difference from ARIMA-GARCH:
   - Fractional differencing preserves all observations (no diff_loss)
   - update_state requires full original-scale history (_y_history)
 
-Inherits from GarchBase — shared fit/forecast/update_state/simulate_paths pipeline.
+Inherits from GarchBase -- shared fit/forecast/update_state/simulate_paths pipeline.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Tuple, Union, Iterable
+from typing import Optional, Tuple, Dict
 
 import numpy as np
-import pandas as pd
 
 from src.core.registry import MODEL_REGISTRY
 from src.models.statistical._garch_base import GarchBase
@@ -37,7 +36,6 @@ from src.models.statistical._primitives import (
     ARMA, GARCH,
     fractional_diff, fractional_diff_weights, fractional_undiff,
 )
-from src.models.statistical.config import ArfimaGarchConfig
 
 
 @MODEL_REGISTRY.register_model(name="arfima_garch")
@@ -51,33 +49,35 @@ class ArfimaGarchForecaster(GarchBase):
     exponentially.
 
     After fit(), use:
-      - forecast(horizon)           → (mu, sigma) arrays from current state
-      - simulate_paths(n, horizon)  → n stochastic paths from current state
-      - update_state(actual_z, x_new) → advance state by one observed value
+      - forecast(horizon)           -> (mu, sigma) arrays from current state
+      - simulate_paths(n, horizon)  -> n stochastic paths from current state
+      - update_state(actual_z, x_new) -> advance state by one observed value
 
-    For rolling evaluation, use RollingForecaster.
+    For rolling evaluation, use RollingRunner.
 
     Example:
-        >>> config = ArfimaGarchConfig(arfima_order=(1, 1), garch_order=(1, 1))
-        >>> model = ArfimaGarchForecaster(dataset=train_df, y_col="power",
-        ...                     config=config)
-        >>> model.fit()
+        >>> model = ArfimaGarchForecaster(hyperparameter={
+        ...     "arfima_order": (1, 1), "garch_order": (1, 1)
+        ... })
+        >>> model.fit(dataset=train_df, y_col="power")
         >>> print(f"Estimated d: {model.d:.4f}")
-        >>> mu, sigma = model.forecast(horizon=24)
+        >>> result = model.forecast(horizon=24)
     """
 
     def __init__(
         self,
-        dataset: pd.DataFrame,
-        y_col: Union[str, int],
-        exog_cols: Optional[Union[str, int, Iterable]] = None,
-        config: Optional[ArfimaGarchConfig] = None,
-        enable_logging: bool = False,
-        save_dir: Optional[str] = None,
-        verbose: bool = False,
+        hyperparameter: Optional[Dict] = None,
         model_name: Optional[str] = None,
     ):
-        self.config = config or ArfimaGarchConfig()
+        hp = dict(hyperparameter) if hyperparameter else {}
+
+        self._arfima_order = tuple(hp.get("arfima_order", (1, 1)))
+        self._garch_order = tuple(hp.get("garch_order", (1, 1)))
+        self._d_bounds = tuple(hp.get("d_bounds", (-0.499, 0.499)))
+        self._truncation_K = hp.get("truncation_K", 500)
+        self._distribution = hp.get("distribution", "normal")
+        self._opt_method = hp.get("opt_method", "SLSQP")
+        self._variance_targeting = hp.get("variance_targeting", True)
 
         # Fitted fractional d (populated by fit)
         self._d: float = 0.0
@@ -86,20 +86,14 @@ class ArfimaGarchForecaster(GarchBase):
         self._y_history: np.ndarray = np.array([])
 
         # Truncation parameter
-        self._K: Optional[int] = self.config.truncation_K
+        self._K: Optional[int] = self._truncation_K
 
         # Cached weights (computed once after fit, reused in rolling)
         self._w_cache: Optional[np.ndarray] = None      # diff weights
         self._pi_cache: Optional[np.ndarray] = None     # undiff weights
 
         super().__init__(
-            dataset=dataset,
-            y_col=y_col,
-            exog_cols=exog_cols,
-            config=self.config,
-            enable_logging=enable_logging,
-            save_dir=save_dir,
-            verbose=verbose,
+            hyperparameter=hyperparameter,
             model_name=model_name,
         )
 
@@ -112,21 +106,12 @@ class ArfimaGarchForecaster(GarchBase):
     # Hook implementations
     # ------------------------------------------------------------------
 
-    def _build_config_hyperparameter(self) -> dict:
-        return {
-            "arfima_order": self.config.arfima_order,
-            "garch_order":  self.config.garch_order,
-            "d_bounds":     self.config.d_bounds,
-            "opt_method":   self.config.opt_method,
-            "distribution": self.config.distribution,
-        }
-
     def _init_mean_primitive(self, n_exog: int) -> None:
-        p, q = self.config.arfima_order
+        p, q = self._arfima_order
         self._mean_prim = ARMA(n_exog=n_exog, order=(p, q))
 
     def _get_pq(self) -> Tuple[int, int]:
-        return self.config.arfima_order
+        return self._arfima_order
 
     def _get_diff_loss(self) -> int:
         # Fractional differencing preserves all observations
@@ -152,18 +137,18 @@ class ArfimaGarchForecaster(GarchBase):
         return [0.0]
 
     def _get_extra_bounds(self) -> list:
-        return [self.config.d_bounds]
+        return [self._d_bounds]
 
     def _get_extra_parscale(self) -> list:
         return [0.3]
 
     def _get_mean_skip(self) -> int:
-        p, q = self.config.arfima_order
+        p, q = self._arfima_order
         return max(p, q)
 
     def _get_root_check_groups(self) -> list:
         # AR and MA checked separately; d excluded from both.
-        p, q = self.config.arfima_order
+        p, q = self._arfima_order
         n_extra = 1  # d
         ar_idx = list(range(n_extra, n_extra + p))
         ma_idx = list(range(n_extra + p, n_extra + p + q))

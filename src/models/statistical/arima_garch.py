@@ -16,20 +16,18 @@ Mathematical model:
 
     where D is Normal or Student-t (configurable via distribution parameter).
 
-Inherits from GarchBase — shared fit/forecast/update_state/simulate_paths pipeline.
+Inherits from GarchBase -- shared fit/forecast/update_state/simulate_paths pipeline.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Tuple, Union, Iterable
+from typing import Optional, Tuple, Dict
 
 import numpy as np
-import pandas as pd
 
 from src.core.registry import MODEL_REGISTRY
 from src.models.statistical._garch_base import GarchBase
 from src.models.statistical._primitives import ARMA, GARCH
-from src.models.statistical.config import ArimaGarchConfig
 
 
 @MODEL_REGISTRY.register_model(name="arima_garch")
@@ -38,47 +36,41 @@ class ArimaGarchForecaster(GarchBase):
     ARIMA(p,d,q)-GARCH(gp,gq) probabilistic forecaster.
 
     After fit(), use:
-      - forecast(horizon)           → (mu, sigma) arrays from current state
-      - simulate_paths(n, horizon)  → n stochastic paths from current state
-      - update_state(actual_z, x_new) → advance state by one observed value
+      - forecast(horizon)           -> (mu, sigma) arrays from current state
+      - simulate_paths(n, horizon)  -> n stochastic paths from current state
+      - update_state(actual_z, x_new) -> advance state by one observed value
 
-    For rolling evaluation over a forecast period, use RollingForecaster
+    For rolling evaluation over a forecast period, use RollingRunner
     which calls these methods in sequence.
 
     Example:
-        >>> config = ArimaGarchConfig(arima_order=(2, 1, 1), garch_order=(1, 1))
-        >>> model = ArimaGarchForecaster(dataset=train_df, y_col="power",
-        ...                    exog_cols=["wind_speed"], config=config)
-        >>> model.fit()
-        >>> mu, sigma = model.forecast(horizon=24)
-        >>> mu.shape   # (24,)
+        >>> model = ArimaGarchForecaster(hyperparameter={
+        ...     "arima_order": (2, 1, 1), "garch_order": (1, 1)
+        ... })
+        >>> model.fit(dataset=train_df, y_col="power", exog_cols=["wind_speed"])
+        >>> result = model.forecast(horizon=24)
     """
 
     def __init__(
         self,
-        dataset: pd.DataFrame,
-        y_col: Union[str, int],
-        exog_cols: Optional[Union[str, int, Iterable]] = None,
-        config: Optional[ArimaGarchConfig] = None,
-        enable_logging: bool = False,
-        save_dir: Optional[str] = None,
-        verbose: bool = False,
+        hyperparameter: Optional[Dict] = None,
         model_name: Optional[str] = None,
     ):
-        self.config = config or ArimaGarchConfig()
-        self._diff_order: int = self.config.arima_order[1]
+        hp = dict(hyperparameter) if hyperparameter else {}
+
+        self._arima_order = tuple(hp.get("arima_order", (1, 0, 1)))
+        self._garch_order = tuple(hp.get("garch_order", (1, 1)))
+        self._distribution = hp.get("distribution", "normal")
+        self._opt_method = hp.get("opt_method", "trust-constr")
+        self._variance_targeting = hp.get("variance_targeting", True)
+
+        self._diff_order: int = self._arima_order[1]
 
         # Undifferencing anchors (populated by fit)
         self._y_tail: np.ndarray = np.array([])
 
         super().__init__(
-            dataset=dataset,
-            y_col=y_col,
-            exog_cols=exog_cols,
-            config=self.config,
-            enable_logging=enable_logging,
-            save_dir=save_dir,
-            verbose=verbose,
+            hyperparameter=hyperparameter,
             model_name=model_name,
         )
 
@@ -86,20 +78,12 @@ class ArimaGarchForecaster(GarchBase):
     # Hook implementations
     # ------------------------------------------------------------------
 
-    def _build_config_hyperparameter(self) -> dict:
-        return {
-            "arima_order":  self.config.arima_order,
-            "garch_order":  self.config.garch_order,
-            "opt_method":   self.config.opt_method,
-            "distribution": self.config.distribution,
-        }
-
     def _init_mean_primitive(self, n_exog: int) -> None:
-        p, _, q = self.config.arima_order
+        p, _, q = self._arima_order
         self._mean_prim = ARMA(n_exog=n_exog, order=(p, q))
 
     def _get_pq(self) -> Tuple[int, int]:
-        p, _, q = self.config.arima_order
+        p, _, q = self._arima_order
         return (p, q)
 
     def _get_diff_loss(self) -> int:
@@ -123,7 +107,7 @@ class ArimaGarchForecaster(GarchBase):
         return []
 
     def _get_mean_skip(self) -> int:
-        p, _, q = self.config.arima_order
+        p, _, q = self._arima_order
         return max(p, q)
 
     def _create_temp_mean_primitive(self, p: int, q: int, n_exog: int):

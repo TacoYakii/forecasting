@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from .base_model import BaseModel, BaseForecaster
+from .base_model import BaseForecaster
 from .forecast_distribution import DISTRIBUTION_REGISTRY
 from .forecast_results import ParametricForecastResult
 
@@ -427,7 +427,7 @@ class RollingRunner:
 # PerHorizonRunner — per-horizon independent ML models
 # ======================================================================
 
-class PerHorizonRunner(BaseModel):
+class PerHorizonRunner:
     """
     Wrapper that trains independent models per forecast horizon and produces
     a unified ParametricForecastResult.
@@ -509,12 +509,11 @@ class PerHorizonRunner(BaseModel):
         self._models: Dict[int, BaseForecaster] = {}
         self._datasets: Dict[int, pd.DataFrame] = {}
 
-        super().__init__(
-            hyperparameter=hyperparameter,
-            enable_logging=enable_logging,
-            save_dir=save_dir,
-            verbose=verbose,
-        )
+        # Standalone attributes (PerHorizonRunner is not a model)
+        self.is_fitted_ = False
+        self.enable_logging = enable_logging
+        self.base_dir = Path(save_dir) if save_dir else Path(".")
+        self.logger = logging.getLogger(f"PerHorizonRunner.{model_name}")
 
     def __repr__(self) -> str:
         n_fitted = sum(1 for m in self._models.values() if m.is_fitted_)
@@ -565,15 +564,13 @@ class PerHorizonRunner(BaseModel):
         train_df = df.loc[self.training_period[0]:self.training_period[1]]
 
         model = model_cls(
+            hyperparameter=dict(self.model_hyperparameter),
+        )
+        model.fit(
             dataset=train_df,
             y_col=self.y_col,
             exog_cols=self.exog_cols,
-            hyperparameter=dict(self.model_hyperparameter),
-            enable_logging=False,
-            save_dir=str(self.base_dir / f"horizon_{h}"),
-            verbose=False,
         )
-        model.fit()
 
         if self.enable_logging:
             self.logger.info(f"Horizon {h}/{self._horizons[-1]} trained.")
@@ -716,7 +713,9 @@ class PerHorizonRunner(BaseModel):
     def _save_model_specific(self, model_path: Path) -> Path:
         """Save all per-horizon models."""
         for h, model in self._models.items():
-            model.save_model()
+            sv_path = self.base_dir / f"horizon_{h}" / f"{model.nm}_model"
+            sv_path.parent.mkdir(parents=True, exist_ok=True)
+            model._save_model_specific(sv_path)
         return self.base_dir
 
     def _load_model_specific(self, model_path: Path) -> None:
@@ -730,13 +729,13 @@ class PerHorizonRunner(BaseModel):
             train_df = df.loc[self.training_period[0]:self.training_period[1]]
 
             model = model_cls(
+                hyperparameter=dict(self.model_hyperparameter),
+            )
+            # Need to set exog_cols so forecast() can use them
+            model.fit(
                 dataset=train_df,
                 y_col=self.y_col,
                 exog_cols=self.exog_cols,
-                hyperparameter=dict(self.model_hyperparameter),
-                enable_logging=False,
-                save_dir=str(self.base_dir / f"horizon_{h}"),
-                verbose=False,
             )
 
             horizon_dir = self.base_dir / f"horizon_{h}"
@@ -745,6 +744,7 @@ class PerHorizonRunner(BaseModel):
                 raise FileNotFoundError(
                     f"No saved model found in {horizon_dir}"
                 )
-            model.load_model(model_files[0])
+            model._load_model_specific(model_files[0].with_suffix(""))
+            model.is_fitted_ = True
             self._models[h] = model
             self._datasets[h] = df

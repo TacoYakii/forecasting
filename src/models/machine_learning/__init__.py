@@ -24,7 +24,6 @@ Available Models:
 For deep learning models (DeepAR, TFT), see src.models.deep_time_series.
 
 Base Classes:
-- BaseModel: Base class for all models (logging, serialization)
 - BaseForecaster: Base class for all forecasting models
 - DeterministicForecaster: Base class for deterministic models with historical std
 - BaseDeepModel: Base class for deep learning models (NeuralForecast wrapper)
@@ -35,7 +34,7 @@ Distribution:
 - mu_std_to_dist_params: Convert (mu, std) to native distribution parameters
 """
 
-from src.core.base_model import BaseModel, BaseForecaster, DeterministicForecaster
+from src.core.base_model import BaseForecaster, DeterministicForecaster
 from src.core.base_deep_model import BaseDeepModel
 from src.core.forecast_distribution import ParametricDistribution, DISTRIBUTION_REGISTRY
 from src.core.moment_matching import mu_std_to_dist_params
@@ -55,7 +54,6 @@ from src.models.machine_learning.pgboost_model import PGBMForecaster, PGBMModel
 # Export all available models
 __all__ = [
     # Base classes
-    'BaseModel',
     'BaseForecaster',
     'DeterministicForecaster',
     'BaseDeepModel',

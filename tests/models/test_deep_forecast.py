@@ -50,12 +50,8 @@ class TestDeepARForecaster:
         from src.models.deep_time_series.deepar import DeepARForecaster
 
         hp = {**_FAST_HP, "loss_type": "distribution", "distribution": "Normal"}
-        model = DeepARForecaster(
-            dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS,
-            hyperparameter=hp,
-            enable_logging=False, save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = DeepARForecaster(hyperparameter=hp)
+        model.fit(dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS)
         assert model.is_fitted_
 
         future_X, future_index = future_exog
@@ -69,12 +65,8 @@ class TestDeepARForecaster:
         from src.models.deep_time_series.deepar import DeepARForecaster
 
         hp = {**_FAST_HP, "loss_type": "quantile"}
-        model = DeepARForecaster(
-            dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS,
-            hyperparameter=hp,
-            enable_logging=False, save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = DeepARForecaster(hyperparameter=hp)
+        model.fit(dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS)
 
         future_X, future_index = future_exog
         result = model.forecast(future_X=future_X, future_index=future_index)
@@ -90,12 +82,8 @@ class TestDeepARForecaster:
         from src.core.forecast_distribution import EmpiricalDistribution
 
         hp = {**_FAST_HP, "loss_type": "quantile"}
-        model = DeepARForecaster(
-            dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS,
-            hyperparameter=hp,
-            enable_logging=False, save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = DeepARForecaster(hyperparameter=hp)
+        model.fit(dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS)
 
         future_X, future_index = future_exog
         result = model.forecast(future_X=future_X, future_index=future_index)
@@ -116,12 +104,8 @@ class TestTFTForecaster:
         """Default MQLoss → QuantileForecastResult (1, H)."""
         from src.models.deep_time_series.tft import TFTForecaster
 
-        model = TFTForecaster(
-            dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS,
-            hyperparameter=_FAST_HP,
-            enable_logging=False, save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = TFTForecaster(hyperparameter=_FAST_HP)
+        model.fit(dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS)
         assert model.is_fitted_
 
         future_X, future_index = future_exog
@@ -135,12 +119,8 @@ class TestTFTForecaster:
         from src.models.deep_time_series.tft import TFTForecaster
 
         hp = {**_FAST_HP, "loss_type": "distribution", "distribution": "Normal"}
-        model = TFTForecaster(
-            dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS,
-            hyperparameter=hp,
-            enable_logging=False, save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = TFTForecaster(hyperparameter=hp)
+        model.fit(dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS)
 
         future_X, future_index = future_exog
         result = model.forecast(future_X=future_X, future_index=future_index)
@@ -152,12 +132,8 @@ class TestTFTForecaster:
         """to_dataframe() works for QuantileForecastResult."""
         from src.models.deep_time_series.tft import TFTForecaster
 
-        model = TFTForecaster(
-            dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS,
-            hyperparameter=_FAST_HP,
-            enable_logging=False, save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = TFTForecaster(hyperparameter=_FAST_HP)
+        model.fit(dataset=train_df, y_col=Y_COL, futr_cols=EXOG_COLS)
 
         future_X, future_index = future_exog
         result = model.forecast(future_X=future_X, future_index=future_index)

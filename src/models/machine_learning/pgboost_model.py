@@ -111,8 +111,7 @@ class PGBMModel:
 
 @MODEL_REGISTRY.register_model(name="pgbm")
 class PGBMForecaster(BaseForecaster):
-    """
-    PGBM-based probabilistic forecaster.
+    """PGBM-based probabilistic forecaster.
 
     PGBM predicts the mean and variance of the target distribution.
     If no distribution is specified in hyperparameters, the best distribution
@@ -122,30 +121,22 @@ class PGBMForecaster(BaseForecaster):
         'normal', 'laplace', 'lognormal', 'gamma', 'gumbel', 'weibull'
 
     forecast() returns a ParametricDistribution with the selected distribution.
+
+    Example:
+        >>> model = PGBMForecaster(hyperparameter={"Dist": "normal"})
+        >>> model.fit(dataset=train_df, y_col="power", exog_cols=["wind_speed"])
+        >>> result = model.forecast(X=test_X, target_index=test_idx)
     """
     def __init__(
         self,
-        dataset: pd.DataFrame,
-        y_col: Union[str, int],
-        exog_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
         hyperparameter: Optional[Dict] = None,
-        enable_logging: bool = False,
-        save_dir: Optional[str] = None,
-        verbose: bool = False,
         model_name: Optional[str] = None,
-        ):
-
+    ):
         super().__init__(
-            dataset,
-            y_col,
-            exog_cols,
-            hyperparameter,
-            enable_logging,
-            save_dir,
-            verbose,
+            hyperparameter=hyperparameter,
             model_name=model_name,
         )
-        
+
         # Validate distribution if pre-specified
         if hyperparameter and "Dist" in hyperparameter:
             dist_str = hyperparameter["Dist"]
@@ -154,14 +145,39 @@ class PGBMForecaster(BaseForecaster):
                     f"Distribution '{dist_str}' is not supported for PGBM. "
                     f"Pick from: {_PGBM_SUPPORTED_DISTRIBUTIONS}."
                 )
-        
+
         self._forecast_dist_name: Optional[str] = (
             hyperparameter.get("Dist") if hyperparameter else None
         )
-        
-        self.model = PGBMModel(hyperparameter) 
-        
-    def fit(self) -> 'PGBMForecaster':
+
+        self.model = PGBMModel(hyperparameter)
+
+    def fit(self, dataset: pd.DataFrame, y_col: Union[str, int],
+            exog_cols=None) -> 'PGBMForecaster':
+        """Train PGBM on the provided dataset.
+
+        Args:
+            dataset: Training DataFrame.
+            y_col: Target column name.
+            exog_cols: Feature columns. None -> all except y_col.
+
+        Returns:
+            Self for method chaining.
+        """
+        dataset = dataset.sort_index()
+        self.y_col = y_col
+        if exog_cols is not None:
+            if isinstance(exog_cols, (str, int)):
+                self.exog_cols = [exog_cols]
+            else:
+                self.exog_cols = list(exog_cols)
+        else:
+            self.exog_cols = [c for c in dataset.columns if c != y_col]
+
+        self.y = dataset[y_col].to_numpy()
+        self.X = dataset[self.exog_cols].to_numpy()
+        self.index = dataset.index
+
         self.model.fit(
             train_X=self.X,
             train_y=self.y,
@@ -176,9 +192,9 @@ class PGBMForecaster(BaseForecaster):
             )
             self._forecast_dist_name = best_dist
             self.hyperparameter["Dist"] = best_dist
-        
+
         self.is_fitted_ = True
-        
+
         return self
     
     def forecast(self, X: np.ndarray, target_index: pd.Index) -> ParametricForecastResult:

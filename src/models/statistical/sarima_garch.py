@@ -16,20 +16,18 @@ Mathematical model (after d regular + D seasonal differencing):
 
     where D is Normal or Student-t (configurable).
 
-Inherits from GarchBase — shared fit/forecast/update_state/simulate_paths pipeline.
+Inherits from GarchBase -- shared fit/forecast/update_state/simulate_paths pipeline.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Tuple, Union, Iterable
+from typing import Optional, Tuple, Dict
 
 import numpy as np
-import pandas as pd
 
 from src.core.registry import MODEL_REGISTRY
 from src.models.statistical._garch_base import GarchBase
 from src.models.statistical._primitives import SARIMA, GARCH
-from src.models.statistical.config import SarimaGarchConfig
 
 
 @MODEL_REGISTRY.register_model(name="sarima_garch")
@@ -38,67 +36,51 @@ class SarimaGarchForecaster(GarchBase):
     SARIMA(p,d,q)(P,D,Q,s)-GARCH(gp,gq) probabilistic forecaster.
 
     After fit(), use:
-      - forecast(horizon)           → (mu, sigma) arrays from current state
-      - simulate_paths(n, horizon)  → n stochastic paths from current state
-      - update_state(actual_z, x_t) → advance state by one observed value
+      - forecast(horizon)           -> (mu, sigma) arrays from current state
+      - simulate_paths(n, horizon)  -> n stochastic paths from current state
+      - update_state(actual_z, x_t) -> advance state by one observed value
 
-    For rolling evaluation over a forecast period, use RollingForecaster
+    For rolling evaluation over a forecast period, use RollingRunner
     which calls these methods in sequence.
 
     Example:
-        >>> config = SarimaGarchConfig(
-        ...     arima_order=(1, 0, 1), seasonal_order=(1, 0, 1, 24),
-        ...     garch_order=(1, 1))
-        >>> model = SarimaGarchForecaster(dataset=train_df, y_col="power",
-        ...                     config=config)
-        >>> model.fit()
-        >>> mu, sigma = model.forecast(horizon=24)
-        >>> mu.shape   # (24,)
+        >>> model = SarimaGarchForecaster(hyperparameter={
+        ...     "arima_order": (1, 0, 1), "seasonal_order": (1, 0, 1, 24),
+        ...     "garch_order": (1, 1)
+        ... })
+        >>> model.fit(dataset=train_df, y_col="power")
+        >>> result = model.forecast(horizon=24)
     """
 
     def __init__(
         self,
-        dataset: pd.DataFrame,
-        y_col: Union[str, int],
-        exog_cols: Optional[Union[str, int, Iterable]] = None,
-        config: Optional[SarimaGarchConfig] = None,
-        enable_logging: bool = False,
-        save_dir: Optional[str] = None,
-        verbose: bool = False,
+        hyperparameter: Optional[Dict] = None,
         model_name: Optional[str] = None,
     ):
-        self.config = config or SarimaGarchConfig()
+        hp = dict(hyperparameter) if hyperparameter else {}
 
-        self._p, self._d, self._q = self.config.arima_order
-        self._P, self._D, self._Q, self._s = self.config.seasonal_order
+        self._arima_order = tuple(hp.get("arima_order", (1, 0, 1)))
+        self._seasonal_order = tuple(hp.get("seasonal_order", (1, 0, 1, 24)))
+        self._garch_order = tuple(hp.get("garch_order", (1, 1)))
+        self._distribution = hp.get("distribution", "normal")
+        self._opt_method = hp.get("opt_method", "SLSQP")
+        self._variance_targeting = hp.get("variance_targeting", True)
+
+        self._p, self._d, self._q = self._arima_order
+        self._P, self._D, self._Q, self._s = self._seasonal_order
 
         # Undifferencing anchors (populated by fit)
         self._regular_tail: np.ndarray = np.array([])   # length d
         self._seasonal_tails: list = []                  # D arrays, each length s
 
         super().__init__(
-            dataset=dataset,
-            y_col=y_col,
-            exog_cols=exog_cols,
-            config=self.config,
-            enable_logging=enable_logging,
-            save_dir=save_dir,
-            verbose=verbose,
+            hyperparameter=hyperparameter,
             model_name=model_name,
         )
 
     # ------------------------------------------------------------------
     # Hook implementations
     # ------------------------------------------------------------------
-
-    def _build_config_hyperparameter(self) -> dict:
-        return {
-            "arima_order":    self.config.arima_order,
-            "seasonal_order": self.config.seasonal_order,
-            "garch_order":    self.config.garch_order,
-            "opt_method":     self.config.opt_method,
-            "distribution":   self.config.distribution,
-        }
 
     def _init_mean_primitive(self, n_exog: int) -> None:
         self._mean_prim = SARIMA(

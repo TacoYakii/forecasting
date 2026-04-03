@@ -65,8 +65,7 @@ class NGBoostModel:
 
 @MODEL_REGISTRY.register_model(name="ngboost")
 class NGBoostForecaster(BaseForecaster):
-    """
-    NGBoost-based probabilistic forecaster.
+    """NGBoost-based probabilistic forecaster.
 
     Supports configurable output distributions via the 'Dist' hyperparameter.
     The distribution name is mapped to a ParametricDistribution dist_name.
@@ -75,35 +74,26 @@ class NGBoostForecaster(BaseForecaster):
         "normal", "studentT", "laplace", "lognormal", "poisson"
 
     forecast() returns a ParametricDistribution with the configured distribution.
+
+    Example:
+        >>> model = NGBoostForecaster(hyperparameter={"Dist": "normal"})
+        >>> model.fit(dataset=train_df, y_col="power", exog_cols=["wind_speed"])
+        >>> result = model.forecast(X=test_X, target_index=test_idx)
     """
     def __init__(
         self,
-        dataset: pd.DataFrame,
-        y_col: Union[str, int],
-        exog_cols: Optional[Union[str, int, Iterable[int], Iterable[str]]] = None,
         hyperparameter: Optional[Dict] = None,
-        enable_logging: bool = False,
-        save_dir: Optional[str] = None,
-        verbose: bool = False,
         model_name: Optional[str] = None,
-        ):
-
+    ):
         super().__init__(
-            dataset,
-            y_col,
-            exog_cols,
-            hyperparameter,
-            enable_logging,
-            save_dir,
-            verbose,
+            hyperparameter=hyperparameter,
             model_name=model_name,
         )
 
         # Resolve distribution
-        if hyperparameter is None:
-            hyperparameter = {"Dist": "normal"}
+        hp = dict(hyperparameter) if hyperparameter else {"Dist": "normal"}
 
-        dist_str = hyperparameter.get("Dist", "normal")
+        dist_str = hp.get("Dist", "normal")
         if dist_str not in _NGBOOST_DIST_MAP:
             raise ValueError(
                 f"Distribution '{dist_str}' is not supported for NGBoost. "
@@ -113,18 +103,43 @@ class NGBoostForecaster(BaseForecaster):
         self._forecast_dist_name: str = dist_str  # store for predict()
 
         # Build params with ngboost class object
-        params = dict(hyperparameter)
+        params = dict(hp)
         params["Dist"] = _NGBOOST_DIST_MAP[dist_str]
 
-        self.model = NGBoostModel(params) 
-    
-    def fit(self) -> 'NGBoostForecaster':
+        self.model = NGBoostModel(params)
+
+    def fit(self, dataset: pd.DataFrame, y_col: Union[str, int],
+            exog_cols=None) -> 'NGBoostForecaster':
+        """Train NGBoost on the provided dataset.
+
+        Args:
+            dataset: Training DataFrame.
+            y_col: Target column name.
+            exog_cols: Feature columns. None -> all except y_col.
+
+        Returns:
+            Self for method chaining.
+        """
+        dataset = dataset.sort_index()
+        self.y_col = y_col
+        if exog_cols is not None:
+            if isinstance(exog_cols, (str, int)):
+                self.exog_cols = [exog_cols]
+            else:
+                self.exog_cols = list(exog_cols)
+        else:
+            self.exog_cols = [c for c in dataset.columns if c != y_col]
+
+        self.y = dataset[y_col].to_numpy()
+        self.X = dataset[self.exog_cols].to_numpy()
+        self.index = dataset.index
+
         self.model.fit(
             train_X=self.X,
             train_y=self.y,
-        ) 
+        )
         self.is_fitted_ = True
-        
+
         return self
     
     def forecast(self, X: np.ndarray, target_index: pd.Index) -> ParametricForecastResult:

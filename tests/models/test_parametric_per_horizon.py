@@ -32,17 +32,11 @@ class TestDeterministicForecasters:
 
     def test_fit_forecast_e2e(self, model_name, train_df, forecast_df, tmp_path):
         """fit → forecast → ParametricForecastResult with correct shape."""
-        from src.models.machine_learning.registry import MODEL_REGISTRY
+        from src.core.registry import MODEL_REGISTRY
 
         model_cls = MODEL_REGISTRY.get(model_name)
-        model = model_cls(
-            dataset=train_df,
-            y_col=Y_COL,
-            exog_cols=EXOG_COLS,
-            enable_logging=False,
-            save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = model_cls()
+        model.fit(dataset=train_df, y_col=Y_COL, exog_cols=EXOG_COLS)
         assert model.is_fitted_
 
         forecast_X = forecast_df[EXOG_COLS].to_numpy()
@@ -68,11 +62,8 @@ class TestDeterministicForecasters:
         """to_distribution(h=1) returns a usable ParametricDistribution."""
         from src.models.machine_learning.lr_model import LRForecaster
 
-        model = LRForecaster(
-            dataset=train_df, y_col=Y_COL, exog_cols=EXOG_COLS,
-            enable_logging=False, save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = LRForecaster()
+        model.fit(dataset=train_df, y_col=Y_COL, exog_cols=EXOG_COLS)
 
         forecast_X = forecast_df[EXOG_COLS].to_numpy()
         result = model.forecast(forecast_X, forecast_df.index)
@@ -89,11 +80,8 @@ class TestDeterministicForecasters:
         """to_dataframe() returns a well-formed DataFrame."""
         from src.models.machine_learning.lr_model import LRForecaster
 
-        model = LRForecaster(
-            dataset=train_df, y_col=Y_COL, exog_cols=EXOG_COLS,
-            enable_logging=False, save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = LRForecaster()
+        model.fit(dataset=train_df, y_col=Y_COL, exog_cols=EXOG_COLS)
 
         result = model.forecast(forecast_df[EXOG_COLS].to_numpy(), forecast_df.index)
         df_out = result.to_dataframe(h=1)
@@ -112,17 +100,11 @@ class TestNativeProbabilisticForecasters:
 
     def test_fit_forecast_e2e(self, model_name, train_df, forecast_df, tmp_path):
         """fit → forecast → ParametricForecastResult with native params."""
-        from src.models.machine_learning.registry import MODEL_REGISTRY
+        from src.core.registry import MODEL_REGISTRY
 
         model_cls = MODEL_REGISTRY.get(model_name)
-        model = model_cls(
-            dataset=train_df,
-            y_col=Y_COL,
-            exog_cols=EXOG_COLS,
-            enable_logging=False,
-            save_dir=str(tmp_path),
-        )
-        model.fit()
+        model = model_cls()
+        model.fit(dataset=train_df, y_col=Y_COL, exog_cols=EXOG_COLS)
         assert model.is_fitted_
 
         forecast_X = forecast_df[EXOG_COLS].to_numpy()
