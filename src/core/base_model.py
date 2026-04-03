@@ -87,6 +87,20 @@ class BaseForecaster(ABC):
         """
         ...
 
+    def load_model(self, model_path: Path) -> None:
+        """Load model state and mark as fitted.
+
+        Args:
+            model_path: Base path without extension.
+
+        Example:
+            >>> model = ArimaGarchForecaster(hyperparameter={...})
+            >>> model.load_model(Path("res/exp_0/model/fitted/arima_garch_model"))
+            >>> model.forecast(horizon=24)
+        """
+        self._load_model_specific(model_path)
+        self.is_fitted_ = True
+
     @abstractmethod
     def fit(self, *args, **kwargs) -> Self:
         """Train the model.

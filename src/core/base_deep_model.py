@@ -297,6 +297,7 @@ class BaseDeepModel(BaseForecaster):
         self._nf = NeuralForecast(
             models=[model],
             freq=self._freq,
+            logger=False,
         )
         self._nf.fit(
             df=train_df,
