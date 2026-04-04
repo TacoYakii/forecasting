@@ -12,21 +12,42 @@ different lifecycle:
 
 Key responsibilities:
 - Pretrained model loading (from_pretrained / download)
-- Optional fine-tuning on training data
+- Optional fine-tuning on training data (full / head / lora strategies)
 - Rolling prediction over the forecast period
 - Sample -> SampleForecastResult or quantile -> QuantileForecastResult conversion
 - Model save/load (weights or pipeline serialization)
 """
 
+import warnings
 from abc import abstractmethod
+from enum import StrEnum
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Self, Union
+from typing import Dict, List, Optional, Self, Union
 
 import numpy as np
 import pandas as pd
 
 from src.core.base_model import BaseForecaster
 from src.core.forecast_results import QuantileForecastResult, SampleForecastResult
+
+
+class FineTuneStrategy(StrEnum):
+    """Fine-tuning strategy for foundation models.
+
+    Members compare equal to their string values, so YAML/JSON configs
+    that store ``"full"`` work transparently.
+
+    Example:
+        >>> FineTuneStrategy("full") == "full"
+        True
+        >>> FineTuneStrategy.HEAD
+        'head'
+    """
+
+    FULL = "full"
+    HEAD = "head"
+    LORA = "lora"
+
 
 # Default hyperparameters for foundation models.
 _DEFAULT_FOUNDATION_HP = {
@@ -36,9 +57,21 @@ _DEFAULT_FOUNDATION_HP = {
     "distribution": "normal",       # distribution name for ForecastResult
     "device": "auto",               # "cuda", "cpu", or "auto"
     "model_name_or_path": None,     # HuggingFace model ID or local path (REQUIRED)
-    "fine_tune": False,             # whether to fine-tune on training data
     "output_type": "samples",       # "samples" -> SampleForecastResult, "quantiles" -> QuantileForecastResult
     "level": [80, 90],              # confidence levels for quantile output (e.g., 80 -> q=0.1, 0.9)
+    # Fine-tuning hyperparameters
+    "fine_tune_strategy": None,                 # None | "full" | "head" | "lora"
+    "fine_tune_epochs": 5,                      # fine-tuning epoch count
+    "fine_tune_lr": 1e-4,                       # fine-tuning learning rate
+    "fine_tune_batch_size": 8,                  # mini-batch size
+    "fine_tune_gradient_accumulation_steps": 4,  # gradient accumulation steps
+    "fine_tune_mixed_precision": True,          # bf16/fp16 auto-selection
+    "fine_tune_val_ratio": 0.2,                 # last 20% as validation
+    "fine_tune_patience": 3,                    # early stopping patience (epochs)
+    # LoRA-specific (only used when strategy="lora")
+    "lora_rank": 8,
+    "lora_alpha": 16,
+    "lora_target_modules": None,
 }
 
 
@@ -73,24 +106,35 @@ class BaseFoundationModel(BaseForecaster):
     - _predict_samples(context, prediction_length) -> np.ndarray: Run inference
 
     Subclasses may optionally implement:
-    - _fine_tune(train_y, train_X): Fine-tune on training data
+    - _fine_tune_model(): Fine-tune the pretrained model on training data
 
     Hyperparameters (common):
         model_name_or_path (str): HuggingFace model ID or local path. REQUIRED.
         context_length (int): Context window size. Default: 512
         prediction_length (int): Forecast horizon. Default: 48
         n_samples (int): Number of forecast samples. Default: 100
-        distribution (str): Distribution name for SampleForecastResult. Default: "normal"
+        distribution (str): Distribution name. Default: "normal"
         device (str): Device for inference. Default: "auto"
-        fine_tune (bool): Whether to fine-tune on training data. Default: False
-        output_type (str): "samples" -> SampleForecastResult, "quantiles" -> QuantileForecastResult. Default: "samples"
+        fine_tune_strategy (str | None): Fine-tuning strategy.
+            None = no fine-tuning, "full" / "head" / "lora".
+        output_type (str): "samples" or "quantiles". Default: "samples"
         level (list[int]): Confidence levels for quantile output. Default: [80, 90]
+
+    Fine-tuning hyperparameters:
+        fine_tune_epochs (int): Number of epochs. Default: 5
+        fine_tune_lr (float): Learning rate. Default: 1e-4
+        fine_tune_batch_size (int): Mini-batch size. Default: 8
+        fine_tune_gradient_accumulation_steps (int): Default: 4
+        fine_tune_mixed_precision (bool): Use bf16/fp16. Default: True
+        fine_tune_val_ratio (float): Validation split ratio. Default: 0.2
+        fine_tune_patience (int): Early stopping patience. Default: 3
 
     Example:
         >>> model = ChronosForecaster(
         ...     hyperparameter={
         ...         "model_name_or_path": "amazon/chronos-t5-large",
         ...         "prediction_length": 48,
+        ...         "fine_tune_strategy": "full",
         ...     }
         ... )
         >>> model.fit(dataset=df, y_col="power")
@@ -115,9 +159,49 @@ class BaseFoundationModel(BaseForecaster):
         self._n_samples: int = int(self._foundation_hp.pop("n_samples", 100))
         self._distribution: str = str(self._foundation_hp.pop("distribution", "normal"))
         self._device: str = _resolve_device(str(self._foundation_hp.pop("device", "auto")))
-        self._fine_tune: bool = bool(self._foundation_hp.pop("fine_tune", False))
         self._output_type: str = str(self._foundation_hp.pop("output_type", "samples"))
         self._level: List[int] = list(self._foundation_hp.pop("level", [80, 90]))
+
+        # --- Fine-tuning strategy (backward-compatible with fine_tune: bool) ---
+        raw_ft = self._foundation_hp.pop("fine_tune", None)
+        raw_strategy = self._foundation_hp.pop("fine_tune_strategy", None)
+
+        if raw_strategy is not None:
+            self._fine_tune_strategy: Optional[FineTuneStrategy] = (
+                FineTuneStrategy(raw_strategy)
+            )
+        elif raw_ft is True:
+            warnings.warn(
+                "fine_tune=True is deprecated. "
+                "Use fine_tune_strategy='full' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self._fine_tune_strategy = FineTuneStrategy.FULL
+        else:
+            self._fine_tune_strategy = None
+
+        # Fine-tuning hyperparameters
+        self._ft_epochs: int = int(self._foundation_hp.pop("fine_tune_epochs", 5))
+        self._ft_lr: float = float(self._foundation_hp.pop("fine_tune_lr", 1e-4))
+        self._ft_batch_size: int = int(self._foundation_hp.pop("fine_tune_batch_size", 8))
+        self._ft_grad_accum: int = int(
+            self._foundation_hp.pop("fine_tune_gradient_accumulation_steps", 4)
+        )
+        self._ft_mixed_precision: bool = bool(
+            self._foundation_hp.pop("fine_tune_mixed_precision", True)
+        )
+        self._ft_val_ratio: float = float(
+            self._foundation_hp.pop("fine_tune_val_ratio", 0.2)
+        )
+        self._ft_patience: int = int(self._foundation_hp.pop("fine_tune_patience", 3))
+
+        # LoRA-specific
+        self._lora_rank: int = int(self._foundation_hp.pop("lora_rank", 8))
+        self._lora_alpha: int = int(self._foundation_hp.pop("lora_alpha", 16))
+        self._lora_target_modules: Optional[List[str]] = self._foundation_hp.pop(
+            "lora_target_modules", None
+        )
 
         if self._model_name_or_path is None:
             raise ValueError(
@@ -132,6 +216,7 @@ class BaseFoundationModel(BaseForecaster):
         # Internal state
         self._pipeline = None  # pretrained model/pipeline (set by _load_pretrained)
         self._freq: Optional[str] = None
+        self._fine_tuned_model_path: Optional[str] = None  # set after fine-tuning
 
         # Initialize exog_cols for load_model() compatibility
         self.exog_cols: List[str] = []
@@ -196,7 +281,7 @@ class BaseFoundationModel(BaseForecaster):
 
         self._load_pretrained()
 
-        if self._fine_tune:
+        if self._fine_tune_strategy is not None:
             self._fine_tune_model()
 
         self.is_fitted_ = True
@@ -337,16 +422,17 @@ class BaseFoundationModel(BaseForecaster):
     # ------------------------------------------------------------------
 
     def _save_model_specific(self, model_path: Path) -> Path:
-        """Save foundation model state.
+        """Save foundation model state as JSON config.
 
-        Default implementation saves the model_name_or_path reference.
-        Subclasses can override to save fine-tuned weights.
+        Persists all metadata needed to reconstruct the model. Subclasses
+        that override this method **must** call ``super()._save_model_specific()``
+        first to write the base JSON, then save model weights separately.
 
         Args:
             model_path: Base path without extension.
 
         Returns:
-            Path to saved state.
+            Path to saved JSON config.
         """
         import json
 
@@ -357,19 +443,29 @@ class BaseFoundationModel(BaseForecaster):
             "prediction_length": self._prediction_length,
             "n_samples": self._n_samples,
             "device": self._device,
-            "fine_tune": self._fine_tune,
             "output_type": self._output_type,
             "level": self._level,
+            # Fine-tuning metadata
+            "fine_tune_strategy": (
+                str(self._fine_tune_strategy)
+                if self._fine_tune_strategy
+                else None
+            ),
+            "fine_tuned_model_path": self._fine_tuned_model_path,
+            # Metadata needed for pipeline reconstruction
+            "exog_cols": list(self.exog_cols) if self.exog_cols else [],
+            "freq": self._freq,
         }
         with open(sv_path, "w") as f:
             json.dump(state, f, indent=2)
         return sv_path
 
     def _load_model_specific(self, model_path: Path) -> None:
-        """Load foundation model state.
+        """Load foundation model state from JSON config and re-load model.
 
-        Default implementation reads the config and re-loads pretrained model.
-        Subclasses can override to load fine-tuned weights.
+        Subclasses that override this method **must** call
+        ``super()._load_model_specific()`` first to restore base metadata,
+        then load fine-tuned weights if applicable.
 
         Args:
             model_path: Base path without extension.
@@ -388,9 +484,22 @@ class BaseFoundationModel(BaseForecaster):
         self._prediction_length = state["prediction_length"]
         self._n_samples = state["n_samples"]
         self._device = state.get("device", self._device)
-        self._fine_tune = state.get("fine_tune", False)
         self._output_type = state.get("output_type", "samples")
         self._level = state.get("level", [80, 90])
+
+        # Restore fine-tuning metadata (backward-compatible with old configs)
+        raw_strategy = state.get("fine_tune_strategy", None)
+        if raw_strategy is None and state.get("fine_tune", False):
+            # Migrate old fine_tune: true → strategy "full"
+            raw_strategy = "full"
+        self._fine_tune_strategy = (
+            FineTuneStrategy(raw_strategy) if raw_strategy else None
+        )
+        self._fine_tuned_model_path = state.get("fine_tuned_model_path", None)
+
+        # Restore pipeline reconstruction metadata
+        self.exog_cols = state.get("exog_cols", [])
+        self._freq = state.get("freq", None)
 
         self._load_pretrained()
 
@@ -438,10 +547,20 @@ class BaseFoundationModel(BaseForecaster):
     def _fine_tune_model(self) -> None:
         """Fine-tune the pretrained model on training data.
 
-        Default implementation raises NotImplementedError.
-        Override in subclasses that support fine-tuning.
+        Reads ``self._fine_tune_strategy`` to determine which strategy to
+        apply. Must mutate ``self._pipeline`` (or the inner model) in-place
+        so that ``_predict_samples()`` works unchanged after fine-tuning.
+
+        Subclasses that support fine-tuning must override this method.
+        The default raises NotImplementedError.
+
+        Example:
+            >>> # Called automatically by fit() when fine_tune_strategy is set
+            >>> model.fit(dataset=df, y_col="power")
         """
         raise NotImplementedError(
-            f"{self.nm} does not support fine-tuning. "
-            f"Set fine_tune=False or implement _fine_tune_model() in the subclass."
+            f"{self.nm} does not support fine-tuning with strategy "
+            f"'{self._fine_tune_strategy}'. Either set "
+            f"fine_tune_strategy=None or implement _fine_tune_model() "
+            f"in the subclass."
         )
