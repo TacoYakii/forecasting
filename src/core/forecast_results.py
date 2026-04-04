@@ -20,8 +20,10 @@ from sklearn.isotonic import IsotonicRegression
 
 from .forecast_distribution import (
     DISTRIBUTION_REGISTRY,
-    EmpiricalDistribution,
+    GridDistribution,
     ParametricDistribution,
+    QuantileDistribution,
+    SampleDistribution,
 )
 
 # ---------------------------------------------------------------------------
@@ -64,7 +66,9 @@ class BaseForecastResult(ABC):
         ...
 
     @abstractmethod
-    def to_distribution(self, h: int) -> Union[ParametricDistribution, EmpiricalDistribution]:
+    def to_distribution(
+        self, h: int
+    ) -> Union[ParametricDistribution, SampleDistribution, QuantileDistribution]:
         """Extract a distribution object for a specific forecast horizon h (1-indexed)."""
         ...
 
@@ -240,6 +244,7 @@ class ParametricForecastResult(BaseForecastResult):
             dist_name=self.dist_name,
             params=params_h,
             index=self.basis_index,
+            base_idx=self.basis_index,
         )
 
     def save(self, path: Union[str, Path]) -> Path:
@@ -349,7 +354,7 @@ class QuantileForecastResult(BaseForecastResult):
         basis_index (pd.Index): Time index for each basis time (length N).
 
     Examples:
-        >>> dist = result.to_distribution(1)   # 1-step-ahead EmpiricalDistribution
+        >>> dist = result.to_distribution(1)   # 1-step-ahead QuantileDistribution
         >>> dist.ppf(0.9)                      # 90th percentile
         >>> dist.interval(coverage=0.9)        # (lower, upper) at 90% coverage
         >>> result.quantile_levels             # [0.05, 0.1, 0.5, 0.9, 0.95]
@@ -424,14 +429,14 @@ class QuantileForecastResult(BaseForecastResult):
         """Raw quantile data, mapping quantile level -> array (N_basis, H)."""
         return dict(self._quantiles_data)
 
-    def to_distribution(self, h: int) -> EmpiricalDistribution:
-        """Extract an EmpiricalDistribution for a specific forecast horizon.
+    def to_distribution(self, h: int) -> QuantileDistribution:
+        """Extract a QuantileDistribution for a specific forecast horizon.
 
         Args:
             h: Forecast horizon (1-indexed).
 
         Returns:
-            EmpiricalDistribution built from stored quantile levels and values.
+            QuantileDistribution built from stored quantile levels and values.
         """
         self._validate_h(h)
         h_idx = h - 1
@@ -439,10 +444,11 @@ class QuantileForecastResult(BaseForecastResult):
         values = np.stack(
             [self._quantiles_data[q][:, h_idx] for q in levels], axis=1
         )  # (N_basis, Q)
-        return EmpiricalDistribution(
+        return QuantileDistribution(
             index=self.basis_index,
             quantile_levels=levels,
             quantile_values=values,
+            base_idx=self.basis_index,
         )
 
     def save(self, path: Union[str, Path]) -> Path:
@@ -551,20 +557,21 @@ class SampleForecastResult(BaseForecastResult):
         """Number of samples per (basis_time, horizon) pair."""
         return self._samples.shape[1]
 
-    def to_distribution(self, h: int) -> EmpiricalDistribution:
-        """Extract an EmpiricalDistribution for a specific forecast horizon.
+    def to_distribution(self, h: int) -> SampleDistribution:
+        """Extract a SampleDistribution for a specific forecast horizon.
 
         Args:
             h: Forecast horizon (1-indexed).
 
         Returns:
-            EmpiricalDistribution built from raw samples at horizon h.
+            SampleDistribution built from raw samples at horizon h.
         """
         self._validate_h(h)
         samples_h = self._samples[:, :, h - 1]  # (N_basis, n_samples)
-        return EmpiricalDistribution(
+        return SampleDistribution(
             index=self.basis_index,
             samples=samples_h,
+            base_idx=self.basis_index,
         )
 
     def path(self, basis_idx: int) -> np.ndarray:
@@ -613,6 +620,139 @@ class SampleForecastResult(BaseForecastResult):
 
 # ---------------------------------------------------------------------------
 # Persistence helpers
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# GridForecastResult
+# ---------------------------------------------------------------------------
+
+class GridForecastResult(BaseForecastResult):
+    """Multi-horizon forecast backed by per-horizon histogram densities.
+
+    Stores a shared grid of bin centers and a probability tensor of shape
+    (N, G, H), where each (n, :, h) slice is a valid histogram distribution.
+
+    Produced by CKDRunner, which applies the same CKD model (or
+    per-horizon optimized CKD) across all forecast horizons.
+
+    Attributes:
+        grid (np.ndarray): Shared y-axis bin centers, shape (G,).
+            Equally spaced, sorted ascending.
+        prob (np.ndarray): Probability tensor, shape (N, G, H).
+            Each ``prob[n, :, h]`` sums to 1.
+        basis_index (pd.Index): Time index of length N.
+
+    Examples:
+        >>> result = ckd_runner.run()
+        >>> result.prob.shape       # (N, G, H)
+        >>> gd = result.to_distribution(h=1)
+        >>> gd.mean()               # (N,)
+        >>> grid_crps(gd, y_obs)    # (N,)
+    """
+
+    def __init__(
+        self,
+        grid: np.ndarray,
+        prob: np.ndarray,
+        basis_index: pd.Index,
+        model_name: str = "",
+    ):
+        grid = np.asarray(grid, dtype=float)
+        prob = np.asarray(prob, dtype=float)
+
+        if grid.ndim != 1:
+            raise ValueError(f"grid must be 1-D, got shape {grid.shape}.")
+        if prob.ndim != 3:
+            raise ValueError(
+                f"prob must be 3-D (N, G, H), got shape {prob.shape}."
+            )
+        if prob.shape[0] != len(basis_index):
+            raise ValueError(
+                f"prob dim 0 ({prob.shape[0]}) != basis_index length "
+                f"({len(basis_index)})."
+            )
+        if prob.shape[1] != len(grid):
+            raise ValueError(
+                f"prob dim 1 ({prob.shape[1]}) != grid length ({len(grid)})."
+            )
+
+        super().__init__(basis_index, model_name)
+        self.grid = grid
+        self.prob = prob
+
+    def _get_horizon(self) -> int:
+        return self.prob.shape[2]
+
+    def __repr__(self) -> str:
+        N, G, H = self.prob.shape
+        return (
+            f"GridForecastResult(N={N}, G={G}, H={H}, "
+            f"range=[{self.grid[0]:.4g}, {self.grid[-1]:.4g}])"
+        )
+
+    def _reindex_positions(
+        self, positions: np.ndarray, idx: pd.Index
+    ) -> "GridForecastResult":
+        return GridForecastResult(
+            grid=self.grid,
+            prob=self.prob[positions, :, :],
+            basis_index=idx,
+            model_name=self.model_name,
+        )
+
+    def to_distribution(self, h: int) -> GridDistribution:
+        """Extract a GridDistribution for a specific forecast horizon.
+
+        Args:
+            h: Forecast horizon (1-indexed).
+
+        Returns:
+            GridDistribution with prob slice for horizon h.
+
+        Example:
+            >>> gd = result.to_distribution(h=3)
+            >>> gd.mean()  # (N,)
+        """
+        self._validate_h(h)
+        return GridDistribution(
+            index=self.basis_index,
+            grid=self.grid,
+            prob=self.prob[:, :, h - 1],
+            base_idx=self.basis_index,
+        )
+
+    def save(self, path: Union[str, Path]) -> Path:
+        """Save result to a directory.
+
+        Args:
+            path: Directory path for saving.
+
+        Returns:
+            Path to the saved directory.
+
+        Example:
+            >>> result.save("res/exp_0/forecast_result")
+        """
+        return _save_forecast_result(self, Path(path))
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "GridForecastResult":
+        """Load result from a directory.
+
+        Args:
+            path: Directory containing saved result files.
+
+        Returns:
+            Loaded GridForecastResult.
+
+        Example:
+            >>> result = GridForecastResult.load("res/exp_0/forecast_result")
+        """
+        return load_forecast_result(Path(path))
+
+
+# ---------------------------------------------------------------------------
+# Save / Load helpers
 # ---------------------------------------------------------------------------
 
 def _save_forecast_result(result: BaseForecastResult, path: Path) -> Path:
@@ -666,6 +806,10 @@ def _save_forecast_result(result: BaseForecastResult, path: Path) -> Path:
     elif isinstance(result, SampleForecastResult):
         metadata["shape"] = list(result.samples.shape)
         np.savez(path / "samples.npz", samples=result.samples)
+
+    elif isinstance(result, GridForecastResult):
+        metadata["shape"] = list(result.prob.shape)
+        np.savez(path / "grid_data.npz", grid=result.grid, prob=result.prob)
 
     metadata["basis_index_file"] = "basis_index.csv"
 
@@ -737,6 +881,15 @@ def load_forecast_result(path: Union[str, Path]) -> BaseForecastResult:
         data = np.load(path / "samples.npz")
         return SampleForecastResult(
             samples=data["samples"],
+            basis_index=basis_index,
+            model_name=model_name,
+        )
+
+    if result_type == "GridForecastResult":
+        data = np.load(path / "grid_data.npz")
+        return GridForecastResult(
+            grid=data["grid"],
+            prob=data["prob"],
             basis_index=basis_index,
             model_name=model_name,
         )

@@ -1,7 +1,7 @@
-from typing import Union
+from typing import Optional, Union
 
 import numpy as np
-from numba import guvectorize
+from numba import guvectorize, njit
 from scipy import special
 
 # Reference list 
@@ -248,13 +248,116 @@ def crps_quantile(
         raise ValueError(f"reduction must be 'obs' or 'mean', got {reduction!r}")
 
 
+@njit(cache=True)
+def _grid_crps_kernel(
+    edges: np.ndarray,
+    cdf_at_edges: np.ndarray,
+    y: np.ndarray,
+    G: int,
+) -> np.ndarray:
+    """Numba-accelerated grid-exact CRPS kernel.
+
+    Args:
+        edges: Bin edges, shape (G+1,).
+        cdf_at_edges: CDF values at edges, shape (T, G+1).
+        y: Observed values, shape (T,).
+        G: Number of grid bins.
+
+    Returns:
+        Per-observation CRPS, shape (T,).
+    """
+    T = y.shape[0]
+    crps_vals = np.empty(T, dtype=np.float64)
+
+    for t in range(T):
+        yt = y[t]
+        if np.isnan(yt):
+            crps_vals[t] = np.nan
+            continue
+        total = 0.0
+        for k in range(G):
+            e_l = edges[k]
+            e_r = edges[k + 1]
+            f_l = cdf_at_edges[t, k]
+            f_r = cdf_at_edges[t, k + 1]
+
+            if yt <= e_l:
+                fl2 = (f_l - 1.0) ** 2
+                fr2 = (f_r - 1.0) ** 2
+                total += (e_r - e_l) / 3.0 * (fl2 + (f_l - 1.0) * (f_r - 1.0) + fr2)
+            elif yt >= e_r:
+                fl2 = f_l * f_l
+                fr2 = f_r * f_r
+                total += (e_r - e_l) / 3.0 * (fl2 + f_l * f_r + fr2)
+            else:
+                frac = (yt - e_l) / (e_r - e_l)
+                f_y = f_l + frac * (f_r - f_l)
+
+                w1 = yt - e_l
+                if w1 > 0.0:
+                    total += w1 / 3.0 * (f_l * f_l + f_l * f_y + f_y * f_y)
+
+                w2 = e_r - yt
+                if w2 > 0.0:
+                    a = (f_y - 1.0) ** 2
+                    b = (f_y - 1.0) * (f_r - 1.0)
+                    c = (f_r - 1.0) ** 2
+                    total += w2 / 3.0 * (a + b + c)
+
+        if yt < edges[0]:
+            total += edges[0] - yt
+        if yt > edges[-1]:
+            total += yt - edges[-1]
+
+        crps_vals[t] = total
+
+    return crps_vals
+
+
+def grid_crps(dist, y: np.ndarray) -> np.ndarray:
+    """Grid-exact CRPS via closed-form per-bin quadratic integration.
+
+    For each bin with piecewise-linear CDF F(x), the integrand
+    (F(x) - 1(x >= y))^2 is piecewise-quadratic.  When y falls
+    inside a bin, that bin is split at y.
+
+    Uses the identity for integrating (ax+b)^2 over [L, R]:
+        integral = (R-L)/3 * [f_L^2 + f_L*f_R + f_R^2]
+    where f_L, f_R are the integrand values at the endpoints.
+
+    Internally dispatches to a Numba-JIT compiled kernel for
+    C-level performance on the T × G double loop.
+
+    Args:
+        dist: A GridDistribution instance.
+        y: Observed values, shape (T,).
+
+    Returns:
+        Per-observation CRPS, shape (T,).
+
+    Example:
+        >>> from src.core.forecast_distribution import GridDistribution
+        >>> gd = GridDistribution(idx, grid, prob)
+        >>> grid_crps(gd, np.array([50.0, 60.0]))
+    """
+    from src.core.forecast_distribution import GridDistribution
+
+    if not isinstance(dist, GridDistribution):
+        raise TypeError(
+            f"Expected GridDistribution, got {type(dist).__name__}."
+        )
+
+    y = np.asarray(y, dtype=np.float64)
+    return _grid_crps_kernel(dist._edges, dist._cdf_at_edges, y, len(dist.grid))
+
+
 def crps(
-    result: "BaseForecastResult",
+    result,
     observed: np.ndarray,
-    h: int,
+    h: Optional[int] = None,
     n_quantiles: int = 99,
 ) -> float:
-    """Compute CRPS for any ForecastResult type (fair comparison).
+    """Compute CRPS for any ForecastResult or GridDistribution (fair comparison).
 
     Converts all result types to pseudo-samples at uniform quantile
     levels, then evaluates with ``crps_numerical``. This ensures
@@ -264,15 +367,17 @@ def crps(
         - ParametricForecastResult: ``dist.ppf(tau)`` -> pseudo-samples
         - SampleForecastResult: ``np.percentile(samples, tau)`` -> pseudo-samples
         - QuantileForecastResult: ``dist.ppf(tau)`` -> pseudo-samples
+        - GridDistribution: ``dist.ppf(tau)`` -> pseudo-samples (no h needed)
 
     For SampleForecastResult, a warning is emitted when the original
     sample count significantly exceeds ``n_quantiles``, indicating
     non-trivial information loss from pseudo-sample compression.
 
     Args:
-        result: A ForecastResult object.
+        result: A ForecastResult object or GridDistribution.
         observed: Observed values, shape (N,).
-        h: Forecast horizon (1-indexed).
+        h: Forecast horizon (1-indexed). Required for ForecastResult types,
+            ignored for GridDistribution.
         n_quantiles: Number of uniform quantile levels for pseudo-sample
             generation. All result types are converted to this many
             pseudo-samples to ensure identical evaluation conditions.
@@ -284,9 +389,11 @@ def crps(
     Example:
         >>> crps_val = crps(sample_result, observed, h=1)
         >>> crps_val = crps(parametric_result, observed, h=3, n_quantiles=199)
+        >>> crps_val = crps(grid_dist, observed)
     """
     import warnings
 
+    from src.core.forecast_distribution import GridDistribution
     from src.core.forecast_results import (
         ParametricForecastResult,
         QuantileForecastResult,
@@ -295,7 +402,16 @@ def crps(
 
     tau = np.linspace(0, 1, n_quantiles + 2)[1:-1]
 
-    if isinstance(result, ParametricForecastResult):
+    if isinstance(result, GridDistribution):
+        pseudo_samples = result.ppf(tau)  # (N, Q)
+
+    elif h is None:
+        raise ValueError(
+            f"h (forecast horizon) is required for {type(result).__name__}. "
+            f"Only GridDistribution can be evaluated without h."
+        )
+
+    elif isinstance(result, ParametricForecastResult):
         dist = result.to_distribution(h)
         pseudo_samples = dist.ppf(tau)  # (N, Q)
 
@@ -322,7 +438,8 @@ def crps(
 
     else:
         raise TypeError(
-            f"Unsupported ForecastResult type: {type(result).__name__}"
+            f"Unsupported type: {type(result).__name__}. "
+            f"Expected ForecastResult or GridDistribution."
         )
 
     return crps_numerical(observed, pseudo_samples)

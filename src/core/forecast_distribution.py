@@ -12,7 +12,7 @@ Key features:
 - to_dataframe() for downstream compatibility (columns: mu, std)
 """
 
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -118,14 +118,12 @@ class ParametricDistribution:
         params (Dict[str, np.ndarray]): Native distribution parameters, each of shape (T,)
         index (pd.Index): Forecast time index of length T
         base_idx (Optional[pd.Index]): Basis time index (original dataset index)
-        chunk_size (Optional[int]): If set, ppf/sample process in chunks of this size
 
     Args:
         dist_name: Distribution name. Must be in DISTRIBUTION_REGISTRY.
         params: Dict mapping parameter names to arrays of shape (T,).
         index: Forecast time index.
         base_idx: Optional basis time index (for to_dataframe()).
-        chunk_size: Optional chunk size for memory-efficient processing of long series.
 
     Examples:
         >>> import numpy as np, pandas as pd
@@ -148,7 +146,6 @@ class ParametricDistribution:
         params: Dict[str, np.ndarray],
         index: pd.Index,
         base_idx: Optional[pd.Index] = None,
-        chunk_size: Optional[int] = None,
     ):
         if dist_name not in DISTRIBUTION_REGISTRY:
             raise ValueError(
@@ -159,7 +156,6 @@ class ParametricDistribution:
         self.params = {k: np.asarray(v, dtype=float) for k, v in params.items()}
         self.index = index
         self.base_idx = base_idx
-        self.chunk_size = chunk_size
 
     def __len__(self) -> int:
         """Number of time steps T."""
@@ -177,54 +173,12 @@ class ParametricDistribution:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _frozen_dist(self, start: int = 0, end: Optional[int] = None):
-        """Build a frozen scipy distribution for the slice [start:end].
+    def _frozen_dist(self):
+        """Build a frozen scipy distribution with full vectorized parameters.
 
         Returns a frozen scipy.stats distribution with vectorized parameters.
         """
-        if end is None:
-            end = len(self)
-        chunk_params = {k: v[start:end] for k, v in self.params.items()}
-        return _build_frozen(self.dist_name, chunk_params)
-
-    def _apply_chunked(self, func: Callable, *args: Any) -> np.ndarray:
-        """Apply func(frozen_dist, *args) in chunks along the time dimension.
-
-        If chunk_size is None, processes all at once.
-        Results are concatenated along axis=0.
-        """
-        T = len(self)
-        chunk_size = self.chunk_size
-
-        if chunk_size is None or T <= chunk_size:
-            frozen = self._frozen_dist()
-            return func(frozen, *args)
-
-        results = []
-        for start in range(0, T, chunk_size):
-            end = min(start + chunk_size, T)
-            frozen = self._frozen_dist(start, end)
-            results.append(func(frozen, *args))
-
-        return np.concatenate(results, axis=0)
-
-    @staticmethod
-    def _ppf_2d(frozen, u_chunk: np.ndarray) -> np.ndarray:
-        """Apply ppf to a 2D uniform array column-by-column.
-
-        scipy frozen distributions with array parameters support ppf(1-D array)
-        returning an array of the same shape. We iterate over the n columns of
-        u_chunk and stack results.
-
-        Args:
-            frozen: scipy frozen distribution with vectorized params of shape (chunk_T,)
-            u_chunk: uniform samples of shape (chunk_T, n)
-
-        Returns:
-            np.ndarray of shape (chunk_T, n)
-        """
-        n = u_chunk.shape[1]
-        return np.stack([frozen.ppf(u_chunk[:, j]) for j in range(n)], axis=1)
+        return _build_frozen(self.dist_name, self.params)
 
     # ------------------------------------------------------------------
     # Public API
@@ -249,20 +203,13 @@ class ParametricDistribution:
         """
         q_arr = np.asarray(q, dtype=float)
         scalar_input = q_arr.ndim == 0
+        frozen = self._frozen_dist()
 
         if scalar_input:
-            def _ppf_scalar(frozen, q_val: float) -> np.ndarray:
-                return frozen.ppf(q_val)
-            return self._apply_chunked(_ppf_scalar, float(q_arr))
+            return frozen.ppf(float(q_arr))
         else:
-            q_arr = q_arr.ravel()  # ensure 1-D
-
-            def _ppf_vector(frozen, q_vec: np.ndarray) -> np.ndarray:
-                # frozen has shape (chunk_T,), q_vec has shape (Q,)
-                # Output shape: (chunk_T, Q)
-                return np.stack([frozen.ppf(qi) for qi in q_vec], axis=-1)
-
-            return self._apply_chunked(_ppf_vector, q_arr)
+            q_arr = q_arr.ravel()
+            return np.stack([frozen.ppf(qi) for qi in q_arr], axis=-1)
 
     def sample(self, n: int = 1000, seed: Optional[int] = None) -> np.ndarray:
         """Generate samples via Inverse Transform Sampling.
@@ -285,18 +232,8 @@ class ParametricDistribution:
         T = len(self)
         rng = np.random.default_rng(seed)
         u = rng.uniform(0.0, 1.0, size=(T, n))  # shape (T, n)
-
-        chunk_size = self.chunk_size
-        if chunk_size is None or T <= chunk_size:
-            frozen = self._frozen_dist()
-            return self._ppf_2d(frozen, u)
-
-        results = []
-        for start in range(0, T, chunk_size):
-            end = min(start + chunk_size, T)
-            frozen = self._frozen_dist(start, end)
-            results.append(self._ppf_2d(frozen, u[start:end]))
-        return np.concatenate(results, axis=0)
+        frozen = self._frozen_dist()
+        return np.stack([frozen.ppf(u[:, j]) for j in range(n)], axis=1)
 
     def cdf(self, x: Union[float, np.ndarray]) -> np.ndarray:
         """Cumulative Distribution Function.
@@ -310,11 +247,8 @@ class ParametricDistribution:
             np.ndarray of shape (T,): CDF values in [0, 1].
         """
         x_arr = np.asarray(x, dtype=float)
-
-        def _cdf(frozen, x_val: np.ndarray) -> np.ndarray:
-            return frozen.cdf(x_val)
-
-        return self._apply_chunked(_cdf, x_arr)
+        frozen = self._frozen_dist()
+        return frozen.cdf(x_arr)
 
     def pdf(self, x: Union[float, np.ndarray]) -> np.ndarray:
         """Probability Density Function (or PMF for discrete distributions).
@@ -326,13 +260,10 @@ class ParametricDistribution:
             np.ndarray of shape (T,): PDF values.
         """
         x_arr = np.asarray(x, dtype=float)
-
-        def _pdf(frozen, x_val: np.ndarray) -> np.ndarray:
-            if hasattr(frozen, 'pdf'):
-                return frozen.pdf(x_val)
-            return frozen.pmf(x_val)
-
-        return self._apply_chunked(_pdf, x_arr)
+        frozen = self._frozen_dist()
+        if hasattr(frozen, 'pdf'):
+            return frozen.pdf(x_arr)
+        return frozen.pmf(x_arr)
 
     def mean(self) -> np.ndarray:
         """Distribution mean for each time step.
@@ -340,10 +271,8 @@ class ParametricDistribution:
         Returns:
             np.ndarray of shape (T,)
         """
-        def _mean(frozen) -> np.ndarray:
-            return frozen.mean()
-
-        return self._apply_chunked(_mean)
+        frozen = self._frozen_dist()
+        return frozen.mean()
 
     def std(self) -> np.ndarray:
         """Distribution standard deviation for each time step.
@@ -351,10 +280,8 @@ class ParametricDistribution:
         Returns:
             np.ndarray of shape (T,)
         """
-        def _std(frozen) -> np.ndarray:
-            return frozen.std()
-
-        return self._apply_chunked(_std)
+        frozen = self._frozen_dist()
+        return frozen.std()
 
     def interval(
         self, coverage: float = 0.9
@@ -414,140 +341,253 @@ class ParametricDistribution:
         }
 
 # ---------------------------------------------------------------------------
-# EmpiricalDistribution: non-parametric distribution from samples or quantiles
+# SampleDistribution
 # ---------------------------------------------------------------------------
 
-class EmpiricalDistribution:
-    """Non-parametric distribution backed by sorted samples.
+class SampleDistribution:
+    """Non-parametric distribution backed by raw samples.
 
-    Provides the same public API as ParametricDistribution (ppf, cdf, pdf,
-    sample, mean, std, to_dataframe) but without assuming any parametric
-    family.  Internally stores a sorted sample array of shape (T, n_samples).
-
-    Can be constructed from:
-    - **Raw samples**: pass ``samples`` of shape (T, n_samples).
-    - **Quantile levels + values**: pass ``quantile_levels`` of shape (Q,) and
-      ``quantile_values`` of shape (T, Q).  Quantile values are used directly
-      as sorted samples (no interpolation).
-
-    Tail behaviour (quantile mode): requests outside the outermost stored
-    quantile levels are clamped to the outermost values (flat extrapolation).
+    CDF is a step function (ECDF): F(x) = #{samples <= x} / S.
+    PPF uses ``np.percentile`` (order-statistic interpolation).
+    Sampling resamples with replacement, preserving discrete support.
 
     Args:
         index: Forecast time index of length T.
-        base_idx: Optional basis time index (for to_dataframe).
         samples: Raw sample array, shape (T, n_samples).
-        quantile_levels: Sorted quantile levels, shape (Q,).
-        quantile_values: Quantile values, shape (T, Q).
+        base_idx: Optional basis time index (for to_dataframe).
 
     Examples:
-        >>> # From samples
-        >>> ed = EmpiricalDistribution(index=idx, samples=samples_2d)
-        >>> ed.ppf(0.5)       # median, shape (T,)
-        >>> ed.cdf(0.0)       # CDF at 0, shape (T,)
-
-        >>> # From quantiles
-        >>> ed = EmpiricalDistribution(
-        ...     index=idx,
-        ...     quantile_levels=np.array([0.1, 0.5, 0.9]),
-        ...     quantile_values=qvals,   # (T, 3)
-        ... )
+        >>> sd = SampleDistribution(index=idx, samples=samples_2d)
+        >>> sd.ppf(0.5)       # median, shape (T,)
+        >>> sd.cdf(0.0)       # ECDF at 0, shape (T,)
+        >>> sd.sample(1000)   # resample, shape (T, 1000)
     """
 
     def __init__(
         self,
         index: pd.Index,
+        samples: np.ndarray,
         base_idx: Optional[pd.Index] = None,
-        *,
-        samples: Optional[np.ndarray] = None,
-        quantile_levels: Optional[np.ndarray] = None,
-        quantile_values: Optional[np.ndarray] = None,
     ):
-        has_samples = samples is not None
-        has_quantiles = (quantile_levels is not None) and (quantile_values is not None)
-
-        if has_samples == has_quantiles:
-            raise ValueError(
-                "Provide exactly one of: 'samples' or "
-                "('quantile_levels' + 'quantile_values')."
-            )
-
-        if has_samples:
-            samples = np.asarray(samples, dtype=float)
-            if samples.ndim != 2:
-                raise ValueError(
-                    f"samples must be 2-D (T, n_samples), got shape {samples.shape}"
-                )
-            if samples.shape[0] != len(index):
-                raise ValueError(
-                    f"samples rows ({samples.shape[0]}) != index length ({len(index)})"
-                )
-            self._sorted = np.sort(samples, axis=1)
-            S = self._sorted.shape[1]
-            # Equiprobable levels: Hazen plotting positions
-            self._levels = (np.arange(1, S + 1) - 0.5) / S
-            self._from_samples = True
-        else:
-            quantile_levels = np.asarray(quantile_levels, dtype=float)
-            quantile_values = np.asarray(quantile_values, dtype=float)
-            if quantile_levels.ndim != 1:
-                raise ValueError("quantile_levels must be 1-D")
-            if quantile_values.ndim != 2:
-                raise ValueError("quantile_values must be 2-D (T, Q)")
-            if quantile_values.shape[1] != len(quantile_levels):
-                raise ValueError(
-                    f"quantile_values columns ({quantile_values.shape[1]}) "
-                    f"!= quantile_levels length ({len(quantile_levels)})"
-                )
-            if quantile_values.shape[0] != len(index):
-                raise ValueError(
-                    f"quantile_values rows ({quantile_values.shape[0]}) "
-                    f"!= index length ({len(index)})"
-                )
-            self._sorted = np.sort(quantile_values, axis=1)
-            self._levels = quantile_levels
-            self._from_samples = False
-
         self.index = index
         self.base_idx = base_idx
-
-    # ------------------------------------------------------------------
-    # Public API (mirrors ParametricDistribution)
-    # ------------------------------------------------------------------
+        samples = np.asarray(samples, dtype=float)
+        if samples.ndim != 2:
+            raise ValueError(
+                f"samples must be 2-D (T, n_samples), got shape {samples.shape}"
+            )
+        if samples.shape[0] != len(index):
+            raise ValueError(
+                f"samples rows ({samples.shape[0]}) != index length ({len(index)})"
+            )
+        self._sorted = np.sort(samples, axis=1)
 
     def __len__(self) -> int:
         return self._sorted.shape[0]
 
     def __repr__(self) -> str:
         return (
-            f"EmpiricalDistribution(T={len(self)}, "
+            f"SampleDistribution(T={len(self)}, "
             f"n_samples={self._sorted.shape[1]})"
         )
 
     def ppf(self, q: Union[float, List[float], np.ndarray]) -> np.ndarray:
-        """Empirical quantile function.
-
-        Sample-backed: uses np.percentile for consistency with
-        np.percentile-based conversion elsewhere in the codebase.
-        Quantile-backed: interpolates between stored (level, value) pairs,
-        preserving the probability-to-value mapping.
+        """Quantile function via ``np.percentile`` on sorted samples.
 
         Args:
             q: Probability value(s) in [0, 1].
 
         Returns:
             Shape (T,) if q is scalar, (T, Q) if q is a vector.
+
+        Examples:
+            >>> median = dist.ppf(0.5)           # shape (T,)
+            >>> bounds = dist.ppf([0.1, 0.9])    # shape (T, 2)
         """
         q_arr = np.asarray(q, dtype=float)
         scalar = q_arr.ndim == 0
+        result = np.percentile(self._sorted, q_arr * 100, axis=1)
+        if scalar:
+            return result  # (T,)
+        return result.T  # (T, Q)
 
-        if self._from_samples:
-            result = np.percentile(self._sorted, q_arr * 100, axis=1)
-            if scalar:
-                return result  # (T,)
-            return result.T  # (T, Q)
+    def cdf(self, x: Union[float, np.ndarray]) -> np.ndarray:
+        """Step-function ECDF: F(x) = #{samples <= x} / S.
 
-        # Quantile-backed: level-aware interpolation
+        Args:
+            x: Scalar or array of shape (T,).
+
+        Returns:
+            np.ndarray of shape (T,).
+        """
+        x_arr = np.asarray(x, dtype=float)
+        if x_arr.ndim == 0:
+            x_arr = np.broadcast_to(float(x_arr), (len(self),))
+        S = self._sorted.shape[1]
+        counts = np.array([
+            np.searchsorted(self._sorted[i], x_arr[i], side="right")
+            for i in range(len(self))
+        ])
+        return counts / S
+
+    def sample(self, n: int = 1000, seed: Optional[int] = None) -> np.ndarray:
+        """Resample with replacement from stored samples.
+
+        Args:
+            n: Number of samples per time step.
+            seed: Random seed.
+
+        Returns:
+            np.ndarray of shape (T, n).
+
+        Examples:
+            >>> samples = dist.sample(n=1000, seed=42)
+        """
+        rng = np.random.default_rng(seed)
+        T = len(self)
+        S = self._sorted.shape[1]
+        indices = rng.integers(0, S, size=(T, n))
+        return np.take_along_axis(self._sorted, indices, axis=1)
+
+    def mean(self) -> np.ndarray:
+        """Arithmetic mean of stored samples, shape (T,)."""
+        return self._sorted.mean(axis=1)
+
+    def std(self) -> np.ndarray:
+        """Sample standard deviation, shape (T,)."""
+        return self._sorted.std(axis=1)
+
+    def pdf(self, x: Union[float, np.ndarray]) -> np.ndarray:
+        """Approximate PDF via finite-difference on the ECDF.
+
+        Uses Silverman's rule-of-thumb bandwidth: h = 1.06 * std * n^{-1/5}.
+
+        Args:
+            x: Value(s). Scalar or array of shape (T,).
+
+        Returns:
+            np.ndarray of shape (T,).
+        """
+        n = self._sorted.shape[1]
+        bandwidth = 1.06 * self.std() * (n ** (-0.2))
+        bandwidth = np.maximum(bandwidth, 1e-9)
+        return (self.cdf(x + bandwidth) - self.cdf(x - bandwidth)) / (
+            2 * bandwidth
+        )
+
+    def interval(
+        self, coverage: float = 0.9
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Prediction interval.
+
+        Args:
+            coverage: Interval coverage probability (default 0.9 -> 5th-95th).
+
+        Returns:
+            Tuple of (lower, upper), each shape (T,).
+
+        Examples:
+            >>> lower, upper = dist.interval(coverage=0.9)
+        """
+        alpha = (1.0 - coverage) / 2.0
+        return self.ppf(alpha), self.ppf(1.0 - alpha)
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Convert to DataFrame with columns: mu, std (and optionally basis_time)."""
+        data: Dict[str, Any] = {"mu": self.mean(), "std": self.std()}
+        if self.base_idx is not None:
+            data = {"basis_time": self.base_idx, **data}
+        return pd.DataFrame(data, index=self.index)
+
+    def get_dist_info(self) -> Dict[str, Any]:
+        """Serializable summary."""
+        return {
+            "dist_name": "sample",
+            "n_samples": self._sorted.shape[1],
+            "T": len(self),
+        }
+
+
+# ---------------------------------------------------------------------------
+# QuantileDistribution
+# ---------------------------------------------------------------------------
+
+class QuantileDistribution:
+    """Non-parametric distribution backed by quantile levels and values.
+
+    CDF is piecewise-linear, interpolating between stored (value, level) pairs.
+    PPF interpolates between (level, value) pairs.
+    Mean and std are computed via trapezoidal integration of Q(u) over [0, 1]
+    with linear tail extrapolation.
+
+    Args:
+        index: Forecast time index of length T.
+        quantile_levels: Sorted quantile levels, shape (Q,).
+        quantile_values: Quantile values, shape (T, Q).
+        base_idx: Optional basis time index (for to_dataframe).
+
+    Examples:
+        >>> qd = QuantileDistribution(
+        ...     index=idx,
+        ...     quantile_levels=np.array([0.1, 0.5, 0.9]),
+        ...     quantile_values=qvals,   # (T, 3)
+        ... )
+        >>> qd.ppf(0.5)       # median, shape (T,)
+        >>> qd.cdf(0.0)       # piecewise-linear CDF at 0, shape (T,)
+    """
+
+    def __init__(
+        self,
+        index: pd.Index,
+        quantile_levels: np.ndarray,
+        quantile_values: np.ndarray,
+        base_idx: Optional[pd.Index] = None,
+    ):
+        self.index = index
+        self.base_idx = base_idx
+        quantile_levels = np.asarray(quantile_levels, dtype=float)
+        quantile_values = np.asarray(quantile_values, dtype=float)
+        if quantile_levels.ndim != 1:
+            raise ValueError("quantile_levels must be 1-D")
+        if quantile_values.ndim != 2:
+            raise ValueError("quantile_values must be 2-D (T, Q)")
+        if quantile_values.shape[1] != len(quantile_levels):
+            raise ValueError(
+                f"quantile_values columns ({quantile_values.shape[1]}) "
+                f"!= quantile_levels length ({len(quantile_levels)})"
+            )
+        if quantile_values.shape[0] != len(index):
+            raise ValueError(
+                f"quantile_values rows ({quantile_values.shape[0]}) "
+                f"!= index length ({len(index)})"
+            )
+        self._sorted = np.sort(quantile_values, axis=1)
+        self._levels = quantile_levels
+
+    def __len__(self) -> int:
+        return self._sorted.shape[0]
+
+    def __repr__(self) -> str:
+        return (
+            f"QuantileDistribution(T={len(self)}, "
+            f"Q={self._sorted.shape[1]})"
+        )
+
+    def ppf(self, q: Union[float, List[float], np.ndarray]) -> np.ndarray:
+        """Quantile function via level-aware linear interpolation.
+
+        Args:
+            q: Probability value(s) in [0, 1].
+
+        Returns:
+            Shape (T,) if q is scalar, (T, Q) if q is a vector.
+
+        Examples:
+            >>> median = dist.ppf(0.5)           # shape (T,)
+            >>> bounds = dist.ppf([0.1, 0.9])    # shape (T, 2)
+        """
+        q_arr = np.asarray(q, dtype=float)
+        scalar = q_arr.ndim == 0
         if scalar:
             q_arr = q_arr.reshape(1)
         else:
@@ -570,13 +610,10 @@ class EmpiricalDistribution:
         return result  # (T, Q)
 
     def cdf(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """Empirical CDF.
-
-        Sample-backed: exact ECDF via searchsorted (F(x) = #{samples <= x} / S).
-        Quantile-backed: interpolation between (value, level) pairs.
+        """Piecewise-linear CDF via interpolation between (value, level) pairs.
 
         Args:
-            x: Value(s) at which to evaluate. Scalar or array of shape (T,).
+            x: Scalar or array of shape (T,).
 
         Returns:
             np.ndarray of shape (T,).
@@ -584,28 +621,108 @@ class EmpiricalDistribution:
         x_arr = np.asarray(x, dtype=float)
         if x_arr.ndim == 0:
             x_arr = np.broadcast_to(float(x_arr), (len(self),))
-        if self._from_samples:
-            S = self._sorted.shape[1]
-            counts = np.array([
-                np.searchsorted(self._sorted[i], x_arr[i], side="right")
-                for i in range(len(self))
-            ])
-            return counts / S
-        else:
-            result = np.empty(len(self), dtype=float)
-            for i in range(len(self)):
-                vals = self._sorted[i]
-                lvls = self._levels
-                # Deduplicate: keep last (max level) for F(x) = P(X <= x)
-                unique_mask = np.diff(vals, append=np.inf) > 0
-                result[i] = np.interp(
-                    x_arr[i], vals[unique_mask], lvls[unique_mask],
-                    left=0.0, right=1.0,
-                )
-            return result
+        result = np.empty(len(self), dtype=float)
+        for i in range(len(self)):
+            vals = self._sorted[i]
+            lvls = self._levels
+            unique_mask = np.diff(vals, append=np.inf) > 0
+            result[i] = np.interp(
+                x_arr[i], vals[unique_mask], lvls[unique_mask],
+                left=0.0, right=1.0,
+            )
+        return result
+
+    def sample(self, n: int = 1000, seed: Optional[int] = None) -> np.ndarray:
+        """Inverse transform sampling via per-row interpolation.
+
+        Args:
+            n: Number of samples per time step.
+            seed: Random seed.
+
+        Returns:
+            np.ndarray of shape (T, n).
+
+        Examples:
+            >>> samples = dist.sample(n=1000, seed=42)
+        """
+        rng = np.random.default_rng(seed)
+        T = len(self)
+        u = rng.uniform(0.0, 1.0, size=(T, n))
+        return np.array([
+            np.interp(u[i], self._levels, self._sorted[i])
+            for i in range(T)
+        ])
+
+    def mean(self) -> np.ndarray:
+        """Mean via trapezoidal integration of Q(u) over [0, 1].
+
+        Includes linear tail extrapolation beyond the outermost quantile
+        levels.  Shape (T,).
+        """
+        du = np.diff(self._levels)
+        midvals = (self._sorted[:, :-1] + self._sorted[:, 1:]) / 2
+        interior = (midvals * du).sum(axis=1)
+
+        tau1 = self._levels[0]
+        slope_left = (
+            (self._sorted[:, 1] - self._sorted[:, 0])
+            / (self._levels[1] - self._levels[0])
+        )
+        left_tail = tau1 * self._sorted[:, 0] - slope_left * tau1**2 / 2
+
+        tau_last = self._levels[-1]
+        slope_right = (
+            (self._sorted[:, -1] - self._sorted[:, -2])
+            / (self._levels[-1] - self._levels[-2])
+        )
+        right_tail = (
+            (1 - tau_last) * self._sorted[:, -1]
+            + slope_right * (1 - tau_last) ** 2 / 2
+        )
+
+        return interior + left_tail + right_tail
+
+    def std(self) -> np.ndarray:
+        """Std via E[X^2] - E[X]^2 with tail extrapolation.  Shape (T,).
+
+        Mirrors the tail treatment in ``mean()``: Q(u) is linearly
+        extrapolated beyond [τ₁, τ_Q], and ∫Q(u)² du is computed
+        analytically for the tail segments.
+        """
+        mu = self.mean()
+
+        # --- Interior E[X²]: trapezoidal rule over observed levels ---
+        du = np.diff(self._levels)
+        midvals_sq = (self._sorted[:, :-1] ** 2 + self._sorted[:, 1:] ** 2) / 2
+        interior = (midvals_sq * du).sum(axis=1)
+
+        # --- Left tail [0, τ₁] ---
+        # Q(u) = a + s·(u - τ₁),  a = Q(τ₁), s = slope_left
+        # ∫₀^τ₁ Q(u)² du = a²·τ₁ - a·s·τ₁² + s²·τ₁³/3
+        tau1 = self._levels[0]
+        a = self._sorted[:, 0]
+        s_l = (
+            (self._sorted[:, 1] - self._sorted[:, 0])
+            / (self._levels[1] - self._levels[0])
+        )
+        left_tail = a**2 * tau1 - a * s_l * tau1**2 + s_l**2 * tau1**3 / 3
+
+        # --- Right tail [τ_Q, 1] ---
+        # Q(u) = b + s·(u - τ_Q),  b = Q(τ_Q), δ = 1 - τ_Q
+        # ∫_{τ_Q}^1 Q(u)² du = b²·δ + b·s·δ² + s²·δ³/3
+        delta = 1.0 - self._levels[-1]
+        b = self._sorted[:, -1]
+        s_r = (
+            (self._sorted[:, -1] - self._sorted[:, -2])
+            / (self._levels[-1] - self._levels[-2])
+        )
+        right_tail = b**2 * delta + b * s_r * delta**2 + s_r**2 * delta**3 / 3
+
+        ex2 = interior + left_tail + right_tail
+        return np.sqrt(np.maximum(ex2 - mu ** 2, 0.0))
 
     def pdf(self, x: Union[float, np.ndarray]) -> np.ndarray:
-        """Approximate PDF via finite-difference on the empirical CDF.
+        """Approximate PDF via finite-difference on the piecewise-linear CDF.
 
         Uses Silverman's rule-of-thumb bandwidth: h = 1.06 * std * n^{-1/5}.
 
@@ -622,69 +739,10 @@ class EmpiricalDistribution:
             2 * bandwidth
         )
 
-    def sample(self, n: int = 1000, seed: Optional[int] = None) -> np.ndarray:
-        """Generate samples per time step.
-
-        For sample-backed distributions, resamples with replacement
-        from original values (preserves discrete support).
-        For quantile-backed distributions, uses inverse transform
-        sampling via ppf with independent draws per row.
-
-        Args:
-            n: Number of samples per time step.
-            seed: Random seed.
-
-        Returns:
-            np.ndarray of shape (T, n).
-        """
-        rng = np.random.default_rng(seed)
-        T = len(self)
-        if self._from_samples:
-            # Resample with replacement from original discrete support
-            S = self._sorted.shape[1]
-            indices = rng.integers(0, S, size=(T, n))
-            return np.take_along_axis(self._sorted, indices, axis=1)
-        else:
-            # Inverse transform with independent draws per row
-            u = rng.uniform(0.0, 1.0, size=(T, n))
-            # Per-row ppf via interpolation
-            return np.array([
-                np.interp(u[i], self._levels, self._sorted[i])
-                for i in range(T)
-            ])
-
-    def mean(self) -> np.ndarray:
-        """Distribution mean, shape (T,).
-
-        Sample-backed: arithmetic mean.
-        Quantile-backed: trapezoidal integration of Q(u) over levels.
-        """
-        if self._from_samples:
-            return self._sorted.mean(axis=1)
-        # E[X] = integral_0^1 Q(u) du ≈ trapezoidal rule over levels
-        du = np.diff(self._levels)  # (S-1,)
-        midvals = (self._sorted[:, :-1] + self._sorted[:, 1:]) / 2  # (T, S-1)
-        return (midvals * du).sum(axis=1)
-
-    def std(self) -> np.ndarray:
-        """Distribution std, shape (T,).
-
-        Sample-backed: sample std.
-        Quantile-backed: from E[X^2] - E[X]^2 via trapezoidal integration.
-        """
-        if self._from_samples:
-            return self._sorted.std(axis=1)
-        du = np.diff(self._levels)
-        midvals = (self._sorted[:, :-1] + self._sorted[:, 1:]) / 2
-        mu = (midvals * du).sum(axis=1)
-        midvals_sq = (self._sorted[:, :-1] ** 2 + self._sorted[:, 1:] ** 2) / 2
-        ex2 = (midvals_sq * du).sum(axis=1)
-        return np.sqrt(np.maximum(ex2 - mu ** 2, 0.0))
-
     def interval(
         self, coverage: float = 0.9
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Prediction interval based on the empirical distribution.
+        """Prediction interval.
 
         Args:
             coverage: Interval coverage probability (default 0.9 -> 5th-95th).
@@ -694,14 +752,12 @@ class EmpiricalDistribution:
 
         Examples:
             >>> lower, upper = dist.interval(coverage=0.9)
-            >>> lower.shape  # (T,)
         """
         alpha = (1.0 - coverage) / 2.0
         return self.ppf(alpha), self.ppf(1.0 - alpha)
 
     def to_dataframe(self) -> pd.DataFrame:
-        """Convert to DataFrame with columns: mu, std (and optionally basis_time).
-        """
+        """Convert to DataFrame with columns: mu, std (and optionally basis_time)."""
         data: Dict[str, Any] = {"mu": self.mean(), "std": self.std()}
         if self.base_idx is not None:
             data = {"basis_time": self.base_idx, **data}
@@ -710,14 +766,343 @@ class EmpiricalDistribution:
     def get_dist_info(self) -> Dict[str, Any]:
         """Serializable summary."""
         return {
-            "dist_name": "empirical",
-            "n_samples": self._sorted.shape[1],
+            "dist_name": "quantile",
+            "Q": self._sorted.shape[1],
             "T": len(self),
+        }
+
+
+class GridDistribution:
+    """Non-parametric distribution backed by a discrete histogram grid.
+
+    Stores a fixed, equally-spaced grid of bin centers and per-time-step
+    probability vectors.  Each grid point represents the center of a bin
+    whose edges lie at the midpoints of adjacent centers (histogram
+    interpretation).
+
+    All statistics (mean, ppf, cdf) are computed from the grid
+    without Monte-Carlo sampling.  The CDF is piecewise-linear between
+    bin edges; the density is piecewise-constant within each bin.
+
+    Attributes:
+        grid: Bin centers, shape (G,). Sorted ascending, equally spaced.
+        prob: Probability weights, shape (T, G). Each row sums to 1.
+        index: Time index of length T.
+        base_idx: Optional basis time index (for to_dataframe).
+
+    Args:
+        index: Forecast time index of length T.
+        grid: Equally-spaced bin centers, shape (G,).
+        prob: Probability weights, shape (T, G).
+        base_idx: Optional basis time index.
+
+    Examples:
+        >>> import numpy as np, pandas as pd
+        >>> grid = np.linspace(0, 100, 51)
+        >>> prob = np.ones((10, 51)) / 51
+        >>> idx = pd.RangeIndex(10)
+        >>> gd = GridDistribution(idx, grid, prob)
+        >>> gd.mean()   # shape (10,)
+        >>> gd.ppf(0.5)  # shape (10,)
+    """
+
+    def __init__(
+        self,
+        index: pd.Index,
+        grid: np.ndarray,
+        prob: np.ndarray,
+        base_idx: Optional[pd.Index] = None,
+    ):
+        grid = np.asarray(grid, dtype=float)
+        prob = np.asarray(prob, dtype=float)
+
+        # --- grid validation ---
+        if grid.ndim != 1 or len(grid) < 2:
+            raise ValueError(
+                f"grid must be 1-D with at least 2 points, got shape {grid.shape}."
+            )
+        if not np.all(np.isfinite(grid)):
+            raise ValueError("grid contains non-finite values.")
+        diffs = np.diff(grid)
+        if np.any(diffs <= 0):
+            raise ValueError("grid must be strictly increasing.")
+        bin_width = diffs[0]
+        if not np.allclose(diffs, bin_width, rtol=1e-6):
+            raise ValueError(
+                "grid must be equally spaced. "
+                f"Expected step {bin_width:.6g}, got range "
+                f"[{diffs.min():.6g}, {diffs.max():.6g}]."
+            )
+
+        # --- prob validation ---
+        if prob.ndim != 2:
+            raise ValueError(f"prob must be 2-D, got shape {prob.shape}.")
+        if prob.shape != (len(index), len(grid)):
+            raise ValueError(
+                f"prob shape {prob.shape} inconsistent with "
+                f"index length {len(index)} and grid length {len(grid)}."
+            )
+        if not np.all(np.isfinite(prob)):
+            raise ValueError("prob contains non-finite values.")
+        if np.any(prob < 0):
+            raise ValueError("prob contains negative values.")
+        row_sums = prob.sum(axis=1)
+        max_dev = np.max(np.abs(row_sums - 1.0))
+        if max_dev > 1e-4:
+            raise ValueError(
+                f"prob row sums deviate from 1.0 by up to {max_dev:.6g} "
+                f"(threshold 1e-4). Check upstream normalization."
+            )
+        # auto-renormalize small float deviations
+        if max_dev > 0:
+            prob = prob / row_sums[:, None]
+
+        self.grid = grid
+        self.prob = prob
+        self.index = index
+        self.base_idx = base_idx
+
+        # derived constants
+        G = len(grid)
+        self._bin_width = float(bin_width)
+        self._edges = np.linspace(
+            grid[0] - self._bin_width / 2,
+            grid[-1] + self._bin_width / 2,
+            G + 1,
+        )
+        # CDF at edges: (T, G+1)  F(e_0)=0, F(e_i)=cumsum
+        cdf = np.cumsum(prob, axis=1)
+        self._cdf_at_edges = np.concatenate(
+            [np.zeros((len(index), 1)), cdf], axis=1
+        )
+
+    # ------------------------------------------------------------------
+    # Dunder
+    # ------------------------------------------------------------------
+
+    def __len__(self) -> int:
+        return self.prob.shape[0]
+
+    def __repr__(self) -> str:
+        return (
+            f"GridDistribution(T={len(self)}, G={len(self.grid)}, "
+            f"range=[{self.grid[0]:.4g}, {self.grid[-1]:.4g}])"
+        )
+
+    # ------------------------------------------------------------------
+    # Moments
+    # ------------------------------------------------------------------
+
+    def mean(self) -> np.ndarray:
+        """Distribution mean, shape (T,).
+
+        Example:
+            >>> gd.mean()  # array of T expected values
+        """
+        return self.prob @ self.grid
+
+    def std(self) -> np.ndarray:
+        """Distribution standard deviation with within-bin correction, shape (T,).
+
+        For histogram bins of width Δ, Var[X] includes a within-bin term Δ²/12.
+
+        Example:
+            >>> gd.std()  # array of T std values
+        """
+        mu = self.mean()
+        ex2 = self.prob @ (self.grid ** 2) + self._bin_width ** 2 / 12
+        return np.sqrt(np.maximum(ex2 - mu ** 2, 0.0))
+
+    # ------------------------------------------------------------------
+    # CDF / PDF / PPF
+    # ------------------------------------------------------------------
+
+    def cdf(self, x: Union[float, np.ndarray]) -> np.ndarray:
+        """Piecewise-linear CDF evaluated at x.
+
+        Args:
+            x: Scalar or array of shape (T,).
+
+        Returns:
+            np.ndarray of shape (T,).
+
+        Example:
+            >>> gd.cdf(50.0)  # shape (T,)
+        """
+        x_arr = np.asarray(x, dtype=float)
+        if x_arr.ndim == 0:
+            x_arr = np.broadcast_to(float(x_arr), (len(self),))
+        edges = self._edges
+        T = len(self)
+        result = np.empty(T, dtype=float)
+        for i in range(T):
+            result[i] = np.interp(x_arr[i], edges, self._cdf_at_edges[i])
+        return result
+
+    def pdf(self, x: Union[float, np.ndarray]) -> np.ndarray:
+        """Piecewise-constant PDF evaluated at x.
+
+        Within each bin, density = prob[i] / bin_width.
+        Outside the support, density = 0.
+
+        Args:
+            x: Scalar or array of shape (T,).
+
+        Returns:
+            np.ndarray of shape (T,).
+
+        Example:
+            >>> gd.pdf(50.0)  # shape (T,)
+        """
+        x_arr = np.asarray(x, dtype=float)
+        if x_arr.ndim == 0:
+            x_arr = np.broadcast_to(float(x_arr), (len(self),))
+        edges = self._edges
+        # bin index: which bin does x fall into?
+        bin_idx = np.searchsorted(edges, x_arr, side="right") - 1
+        bin_idx = np.clip(bin_idx, 0, len(self.grid) - 1)
+        # outside support or NaN → 0 (NaN comparisons yield False)
+        nan_mask = np.isnan(x_arr)
+        outside = nan_mask | (x_arr < edges[0]) | (x_arr > edges[-1])
+        result = self.prob[np.arange(len(self)), bin_idx] / self._bin_width
+        result[outside] = 0.0
+        return result
+
+    def ppf(self, q: Union[float, List[float], np.ndarray]) -> np.ndarray:
+        """Quantile function via CDF inverse interpolation.
+
+        Args:
+            q: Probability level(s) in [0, 1]. Scalar or array.
+
+        Returns:
+            Shape (T,) if q is scalar, (T, Q) if q is a vector.
+
+        Example:
+            >>> gd.ppf(0.5)          # median, shape (T,)
+            >>> gd.ppf([0.1, 0.9])   # shape (T, 2)
+        """
+        q_arr = np.asarray(q, dtype=float)
+        scalar = q_arr.ndim == 0
+        if scalar:
+            q_arr = q_arr.reshape(1)
+        else:
+            q_arr = q_arr.ravel()
+
+        edges = self._edges
+        T = len(self)
+        Q = len(q_arr)
+        result = np.empty((T, Q), dtype=float)
+        for i in range(T):
+            result[i] = np.interp(q_arr, self._cdf_at_edges[i], edges)
+
+        if scalar:
+            return result[:, 0]
+        return result
+
+    # ------------------------------------------------------------------
+    # Sampling
+    # ------------------------------------------------------------------
+
+    def sample(self, n: int = 1000, seed: Optional[int] = None) -> np.ndarray:
+        """Generate samples via multinomial + uniform jitter within bins.
+
+        Args:
+            n: Number of samples per time step.
+            seed: Random seed.
+
+        Returns:
+            np.ndarray of shape (T, n).
+
+        Example:
+            >>> samples = gd.sample(500, seed=42)
+            >>> samples.shape  # (T, 500)
+        """
+        rng = np.random.default_rng(seed)
+        T, G = self.prob.shape
+        bw = self._bin_width
+
+        # multinomial bin selection
+        samples = np.empty((T, n), dtype=float)
+        for i in range(T):
+            bins = rng.choice(G, size=n, p=self.prob[i])
+            jitter = rng.uniform(-bw / 2, bw / 2, size=n)
+            samples[i] = self.grid[bins] + jitter
+        return samples
+
+    # ------------------------------------------------------------------
+    # Interval
+    # ------------------------------------------------------------------
+
+    def interval(
+        self, coverage: float = 0.9
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Prediction interval from the histogram CDF.
+
+        Args:
+            coverage: Interval coverage probability (default 0.9).
+
+        Returns:
+            Tuple of (lower, upper), each shape (T,).
+
+        Example:
+            >>> lower, upper = gd.interval(0.9)
+        """
+        alpha = (1.0 - coverage) / 2.0
+        return self.ppf(alpha), self.ppf(1.0 - alpha)
+
+    # ------------------------------------------------------------------
+    # DataFrame conversion
+    # ------------------------------------------------------------------
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Convert to summary DataFrame with columns: mu, std.
+
+        Follows the same contract as ParametricDistribution and
+        SampleDistribution / QuantileDistribution.
+
+        Example:
+            >>> df = gd.to_dataframe()
+            >>> df.columns.tolist()  # ['mu', 'std'] or ['basis_time', 'mu', 'std']
+        """
+        data: Dict[str, Any] = {"mu": self.mean(), "std": self.std()}
+        if self.base_idx is not None:
+            data = {"basis_time": self.base_idx, **data}
+        return pd.DataFrame(data, index=self.index)
+
+    def to_grid_dataframe(self) -> pd.DataFrame:
+        """Convert to full grid × time probability matrix.
+
+        Returns:
+            pd.DataFrame with index = time, columns = grid values.
+
+        Example:
+            >>> df = gd.to_grid_dataframe()
+            >>> df.shape  # (T, G)
+        """
+        df = pd.DataFrame(self.prob, columns=self.grid, index=self.index)
+        df.index.name = "forecast_time"
+        return df
+
+    def get_dist_info(self) -> Dict[str, Any]:
+        """Serializable summary.
+
+        Example:
+            >>> gd.get_dist_info()
+            {'dist_name': 'grid', 'G': 51, 'T': 10, ...}
+        """
+        return {
+            "dist_name": "grid",
+            "G": len(self.grid),
+            "T": len(self),
+            "bin_width": self._bin_width,
+            "range": [float(self._edges[0]), float(self._edges[-1])],
         }
 
 
 __all__ = [
     "DISTRIBUTION_REGISTRY",
     "ParametricDistribution",
-    "EmpiricalDistribution",
+    "SampleDistribution",
+    "QuantileDistribution",
+    "GridDistribution",
 ]
