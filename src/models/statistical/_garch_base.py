@@ -22,11 +22,11 @@ from typing import Optional, Tuple, Union, Iterable, Dict, List, Self
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
-from scipy.special import gammaln
 
 from src.core.base_model import BaseForecaster
 from src.core.forecast_results import ParametricForecastResult
 from src.core.forecast_results import SampleForecastResult
+from src.models.statistical._innovations import get_innovation, INNOVATION_REGISTRY
 from src.models.statistical._primitives import GARCH
 
 
@@ -49,45 +49,6 @@ def _max_root_modulus(coeffs: np.ndarray) -> float:
     C[0, :] = coeffs
     np.fill_diagonal(C[1:, :-1], 1.0)
     return float(np.max(np.abs(np.linalg.eigvals(C))))
-
-
-# -- Log-likelihood functions (vectorised, no per-element overhead) ----------
-
-def _normal_loglik(eps: np.ndarray, sigma: np.ndarray) -> float:
-    """Sum of log N(0, sigma) densities. Avoids scipy overhead."""
-    standardised = eps / sigma
-    return float(np.sum(
-        -0.5 * np.log(2.0 * np.pi) - np.log(sigma)
-        - 0.5 * standardised * standardised
-    ))
-
-
-def _studentt_loglik(eps: np.ndarray, sigma: np.ndarray, df: float) -> float:
-    """
-    Sum of log **standardised** Student-t(df, 0, sigma) densities.
-
-    Uses the standardised Student-t (variance=1) parameterisation matching
-    rugarch: the GARCH sigma^2_t equals the true conditional variance,
-    regardless of df.
-
-    Density:
-      f(z; nu) = Gamma((nu+1)/2) / [Gamma(nu/2) * sqrt(pi*(nu-2))]
-                 * (1 + z^2/(nu-2))^{-(nu+1)/2}
-
-    where z = eps / sigma (standardised residual).
-
-    Implemented via gammaln for numerical stability.
-    """
-    half_dfp1 = 0.5 * (df + 1.0)
-    half_df = 0.5 * df
-    standardised = eps / sigma
-
-    log_const = (gammaln(half_dfp1) - gammaln(half_df)
-                 - 0.5 * np.log((df - 2.0) * np.pi))
-    log_density = (log_const - np.log(sigma)
-                   - half_dfp1 * np.log(1.0 + standardised * standardised / (df - 2.0)))
-
-    return float(np.sum(log_density))
 
 
 class GarchBase(BaseForecaster):
@@ -129,8 +90,6 @@ class GarchBase(BaseForecaster):
         >>> result = model.forecast(horizon=24)
     """
 
-    _MLE_DISTRIBUTIONS = {"normal", "studentT"}
-
     def __init__(
         self,
         hyperparameter: Optional[Dict] = None,
@@ -138,11 +97,7 @@ class GarchBase(BaseForecaster):
     ):
         # Subclass must set self._distribution, self._garch_order,
         # self._variance_targeting, self._opt_method BEFORE calling super().__init__
-        if self._distribution not in self._MLE_DISTRIBUTIONS:
-            raise ValueError(
-                f"distribution must be one of {self._MLE_DISTRIBUTIONS}, "
-                f"got '{self._distribution}'"
-            )
+        self._innov = get_innovation(self._distribution)
 
         super().__init__(
             hyperparameter=hyperparameter,
@@ -161,8 +116,16 @@ class GarchBase(BaseForecaster):
         self._residuals: np.ndarray = np.array([])
         self._sigma2: np.ndarray = np.array([])
 
-        # Estimated df for Student-t (None if normal)
+        # Fitted distribution parameters (e.g. {"df": 5.2} for studentT)
+        self._dist_params: dict = {}
+
+        # Backward compatibility: df shortcut for studentT
         self._df: Optional[float] = None
+
+        # Information criteria (populated by fit)
+        self._nll: Optional[float] = None
+        self._n_obs: Optional[int] = None
+        self._n_params: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Abstract hooks -- subclasses MUST implement
@@ -339,7 +302,7 @@ class GarchBase(BaseForecaster):
 
         p, q = self._get_pq()
         gp, gq = self._garch_order
-        use_t = self._distribution == "studentT"
+        n_dist = self._innov.n_extra_params
         use_vt = self._variance_targeting
 
         # Differencing
@@ -385,8 +348,7 @@ class GarchBase(BaseForecaster):
             base_params = (extra_init + ar_init + ma_init + x_init
                            + garch_init + arch_init + [np.log(omega_init)])
 
-        if use_t:
-            base_params.append(5.0)
+        base_params.extend(self._innov.param_init())
 
         x0 = np.array(base_params)
 
@@ -399,8 +361,10 @@ class GarchBase(BaseForecaster):
         # Exog scales
         for i, xi in enumerate(x_init):
             scales[n_extra + p + q + i] = max(abs(xi), 1.0)
-        if use_t:
-            scales[-1] = 5.0
+        # Distribution param scales
+        dist_scales = self._innov.param_scales()
+        for i, ds in enumerate(dist_scales):
+            scales[-(n_dist - i)] = ds
 
         # --------------- Bounds (in scaled space) ---------------
         extra_bounds = self._get_extra_bounds()
@@ -412,8 +376,7 @@ class GarchBase(BaseForecaster):
         )
         if not use_vt:
             bounds_raw.append((None, None))  # log_omega unbounded
-        if use_t:
-            bounds_raw.append((2.01, 100.0))
+        bounds_raw.extend(self._innov.param_bounds())
 
         bounds_scaled = [
             (lo / s if lo is not None else None,
@@ -495,10 +458,8 @@ class GarchBase(BaseForecaster):
             sigma_tail = np.sqrt(sigma2[skip:])
             np.maximum(sigma_tail, 1e-9, out=sigma_tail)
 
-            if use_t:
-                nll = -_studentt_loglik(eps_tail, sigma_tail, params[-1])
-            else:
-                nll = -_normal_loglik(eps_tail, sigma_tail)
+            dist_p = params[-n_dist:] if n_dist > 0 else np.array([])
+            nll = -self._innov.loglik(eps_tail, sigma_tail, dist_p)
 
             if not np.isfinite(nll):
                 return 1e15
@@ -554,8 +515,9 @@ class GarchBase(BaseForecaster):
             "GARCH": beta_fit, "ARCH": alpha_fit, "CONSTANT": omega_fit,
         }
 
-        if use_t:
-            self._df = float(params[-1])
+        dist_tail = params[-n_dist:] if n_dist > 0 else np.array([])
+        self._dist_params = self._innov.extract_fitted_params(dist_tail)
+        self._df = self._dist_params.get("df")
 
         # Store final differenced series (may differ from initial if d was estimated)
         y_diff_final = self._apply_differencing_in_nll(self.y, params)
@@ -575,8 +537,79 @@ class GarchBase(BaseForecaster):
         )
         self._sigma2 = self._garch.compute_variance_series(self._residuals)
 
+        # --------------- Joint information criteria ---------------
+        eps_ic = self._residuals[skip:]
+        sigma_ic = np.sqrt(self._sigma2[skip:])
+        np.maximum(sigma_ic, 1e-9, out=sigma_ic)
+
+        dist_p_ic = dist_tail if n_dist > 0 else np.array([])
+        self._nll = -self._innov.loglik(eps_ic, sigma_ic, dist_p_ic)
+
+        self._n_obs = len(eps_ic)
+        self._n_params = (n_extra + p + q + n_exog + gp + gq
+                          + (0 if use_vt else 1)
+                          + n_dist)
+
         self.is_fitted_ = True
         return self
+
+    # ------------------------------------------------------------------
+    # Information criteria (joint ARMA-GARCH)
+    # ------------------------------------------------------------------
+
+    @property
+    def aic(self) -> float:
+        """Akaike Information Criterion of the joint model.
+
+        Example:
+            >>> model.fit(dataset=df, y_col="power")
+            >>> model.aic
+            1234.56
+        """
+        if self._nll is None:
+            raise RuntimeError("Model must be fitted before accessing AIC.")
+        return 2.0 * self._nll + 2.0 * self._n_params
+
+    @property
+    def bic(self) -> float:
+        """Bayesian Information Criterion of the joint model.
+
+        Example:
+            >>> model.fit(dataset=df, y_col="power")
+            >>> model.bic
+            1250.78
+        """
+        if self._nll is None:
+            raise RuntimeError("Model must be fitted before accessing BIC.")
+        return 2.0 * self._nll + self._n_params * np.log(self._n_obs)
+
+    @property
+    def aicc(self) -> float:
+        """Corrected AIC (AICc) for small-sample bias.
+
+        Example:
+            >>> model.fit(dataset=df, y_col="power")
+            >>> model.aicc
+            1235.12
+        """
+        if self._nll is None:
+            raise RuntimeError("Model must be fitted before accessing AICc.")
+        k = self._n_params
+        n = self._n_obs
+        return self.aic + 2.0 * k * (k + 1.0) / (n - k - 1.0)
+
+    @property
+    def loglik(self) -> float:
+        """Joint log-likelihood of the fitted model.
+
+        Example:
+            >>> model.fit(dataset=df, y_col="power")
+            >>> model.loglik
+            -612.34
+        """
+        if self._nll is None:
+            raise RuntimeError("Model must be fitted before accessing loglik.")
+        return -self._nll
 
     # ------------------------------------------------------------------
     # Forecast (single point-in-time)
@@ -636,23 +669,11 @@ class GarchBase(BaseForecaster):
         sigma = self._undifference_sigma(sigma_diff)
 
         # Build native params -- reshape to (1, H)
-        dist_name = self._distribution
-        if dist_name == "studentT" and self._df is not None:
-            df = self._df
-            params = {
-                "loc": mu.reshape(1, -1),
-                "scale": (sigma * np.sqrt((df - 2.0) / df)).reshape(1, -1),
-                "df": np.full_like(mu, df).reshape(1, -1),
-            }
-        else:
-            params = {
-                "loc": mu.reshape(1, -1),
-                "scale": np.maximum(sigma, 1e-9).reshape(1, -1),
-            }
+        params = self._innov.forecast_params(mu, sigma, self._dist_params)
 
         basis_index = pd.Index([self.index[-1]])
         return ParametricForecastResult(
-            dist_name=dist_name,
+            dist_name=self._distribution,
             params=params,
             basis_index=basis_index,
             model_name=self.nm,
@@ -728,12 +749,9 @@ class GarchBase(BaseForecaster):
         n_exog = self._x_aligned.shape[1] if self._x_aligned.ndim == 2 else 0
 
         # Draw all shocks at once
-        if self._distribution == "studentT" and self._df is not None:
-            df = self._df
-            raw = rng.standard_t(df, size=(n_paths, horizon))
-            eta = raw * np.sqrt((df - 2.0) / df)
-        else:
-            eta = rng.standard_normal(size=(n_paths, horizon))
+        eta = self._innov.sample_shocks(
+            rng, (n_paths, horizon), self._dist_params,
+        )
 
         _empty_x = np.array([])
         x_fut = (np.asarray(x_future)
@@ -812,7 +830,7 @@ class GarchBase(BaseForecaster):
             "x_aligned":          self._x_aligned,
             "residuals":          self._residuals,
             "sigma2":             self._sigma2,
-            "df":                 self._df,
+            "dist_params":        self._dist_params,
             "index":              getattr(self, "index", None),
         }
         state.update(self._get_state_dict())
@@ -835,7 +853,8 @@ class GarchBase(BaseForecaster):
         self._x_aligned = state["x_aligned"]
         self._residuals = state["residuals"]
         self._sigma2 = state["sigma2"]
-        self._df = state.get("df")
+        self._dist_params = state.get("dist_params", {})
+        self._df = self._dist_params.get("df")
         if "index" in state and state["index"] is not None:
             self.index = state["index"]
         self._load_state_dict(state)

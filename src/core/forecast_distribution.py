@@ -17,6 +17,156 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 from scipy import stats
+from scipy.special import gammaln
+
+
+# ---------------------------------------------------------------------------
+# Hansen's Skewed Student-t (scipy rv_continuous subclass)
+# ---------------------------------------------------------------------------
+
+class _SkewStudentT_gen(stats.rv_continuous):
+    r"""Hansen (1994) standardised skewed Student-t distribution.
+
+    Shape parameters:
+        df:   degrees of freedom (> 2)
+        skew: skewness parameter in (-1, 1)
+
+    The distribution is standardised to have mean 0 and variance 1.
+    When skew = 0 it reduces to the standard Student-t (also standardised
+    to unit variance).
+
+    The density is defined via a re-scaled, two-piece Student-t:
+
+    .. math::
+
+        g(y \mid \eta, \lambda) = \begin{cases}
+          bc \left(1 + \frac{1}{\eta-2}
+             \left(\frac{by+a}{1-\lambda}\right)^2\right)^{-(\eta+1)/2}
+          & \text{if } y < -a/b \\[6pt]
+          bc \left(1 + \frac{1}{\eta-2}
+             \left(\frac{by+a}{1+\lambda}\right)^2\right)^{-(\eta+1)/2}
+          & \text{if } y \geq -a/b
+        \end{cases}
+
+    Reference:
+        Hansen, B.E. (1994). Autoregressive Conditional Density Estimation.
+        International Economic Review, 35(3), 705-730.
+
+    Example:
+        >>> rv = skew_student_t(df=5, skew=-0.3, loc=0, scale=1)
+        >>> rv.pdf(0.0)
+    """
+
+    def _argcheck(self, df, skew):
+        return (df > 2) & (np.abs(skew) < 1)
+
+    def _pdf(self, x, df, skew):
+        df = np.asarray(df, dtype=float)
+        skew = np.asarray(skew, dtype=float)
+        x = np.asarray(x, dtype=float)
+
+        a, b, c = self._abc(df, skew)
+        threshold = -a / b
+
+        out = np.empty_like(x)
+        left = x < threshold
+        right = ~left
+
+        if np.any(left):
+            xl = x[left]
+            out[left] = (
+                b[left] * c[left]
+                * (1.0 + (b[left] * xl + a[left]) ** 2
+                   / ((1.0 - skew[left]) ** 2 * (df[left] - 2.0)))
+                ** (-(df[left] + 1.0) / 2.0)
+            )
+
+        if np.any(right):
+            xr = x[right]
+            out[right] = (
+                b[right] * c[right]
+                * (1.0 + (b[right] * xr + a[right]) ** 2
+                   / ((1.0 + skew[right]) ** 2 * (df[right] - 2.0)))
+                ** (-(df[right] + 1.0) / 2.0)
+            )
+
+        return out
+
+    def _cdf(self, x, df, skew):
+        df = np.asarray(df, dtype=float)
+        skew = np.asarray(skew, dtype=float)
+        x = np.asarray(x, dtype=float)
+
+        a, b, c = self._abc(df, skew)
+        threshold = -a / b
+
+        out = np.empty_like(x)
+        left = x < threshold
+        right = ~left
+
+        # Rescale to standard t(df) with unit scale sqrt((df-2)/df)
+        # so that t_std ~ t(df, 0, 1) in scipy parameterisation
+        scale_t = np.sqrt((df - 2.0) / df)
+
+        if np.any(left):
+            xl = x[left]
+            sl = 1.0 - skew[left]
+            u = (b[left] * xl + a[left]) / (sl * scale_t[left])
+            out[left] = sl * stats.t.cdf(u, df[left])
+
+        if np.any(right):
+            xr = x[right]
+            sr = 1.0 + skew[right]
+            u = (b[right] * xr + a[right]) / (sr * scale_t[right])
+            out[right] = (1.0 - skew[right]) / 2.0 + sr * (
+                stats.t.cdf(u, df[right]) - 0.5
+            )
+
+        return out
+
+    def _ppf(self, q, df, skew):
+        df = np.asarray(df, dtype=float)
+        skew = np.asarray(skew, dtype=float)
+        q = np.asarray(q, dtype=float)
+
+        a, b, c = self._abc(df, skew)
+        q_threshold = (1.0 - skew) / 2.0
+        scale_t = np.sqrt((df - 2.0) / df)
+
+        out = np.empty_like(q)
+        left = q < q_threshold
+        right = ~left
+
+        if np.any(left):
+            ql = q[left]
+            sl = 1.0 - skew[left]
+            u = stats.t.ppf(ql / sl, df[left])
+            out[left] = (sl * scale_t[left] * u - a[left]) / b[left]
+
+        if np.any(right):
+            qr = q[right]
+            sr = 1.0 + skew[right]
+            u = stats.t.ppf(0.5 + (qr - (1.0 - skew[right]) / 2.0) / sr,
+                            df[right])
+            out[right] = (sr * scale_t[right] * u - a[right]) / b[right]
+
+        return out
+
+    @staticmethod
+    def _abc(df, skew):
+        """Compute Hansen's a, b, c constants."""
+        c = np.exp(
+            gammaln((df + 1.0) / 2.0)
+            - gammaln(df / 2.0)
+            - 0.5 * np.log(np.pi * (df - 2.0))
+        )
+        a = 4.0 * skew * c * (df - 2.0) / (df - 1.0)
+        b = np.sqrt(1.0 + 3.0 * skew ** 2 - a ** 2)
+        return a, b, c
+
+
+skew_student_t = _SkewStudentT_gen(name="skew_student_t")
+
 
 # ---------------------------------------------------------------------------
 # Distribution registry
@@ -49,6 +199,12 @@ DISTRIBUTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         "params": ["loc", "scale", "df"],
         "clamp": {"scale": _EPS, "df": 2.01},
         "scipy_map": {"df": "df", "loc": "loc", "scale": "scale"},
+    },
+    "skewStudentT": {
+        "scipy": skew_student_t,
+        "params": ["loc", "scale", "df", "skew"],
+        "clamp": {"scale": _EPS, "df": 2.01},
+        "scipy_map": {"df": "df", "skew": "skew", "loc": "loc", "scale": "scale"},
     },
     "lognormal": {
         "scipy": stats.lognorm,
