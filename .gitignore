@@ -1,37 +1,26 @@
-# Python-generated files
+# Python
 __pycache__/
 *.py[oc]
+*.egg-info
 build/
 dist/
 wheels/
-*.egg-info
+.venv/
 
-# Virtual environments
-.venv
-
-# NPM
-package-lock.json
-package.json
-
-# Dataset
-/data/
-**/res/
+# Data / artifacts
 *.csv
+*.pkl
+*.log
+*.ckpt
+*.pt
+*.pth
+*.png
+*.jpg
+*.jpeg
 
-# Documentation (local reference only)
-/docs/
-
-# IDE / tool configs
-.claude/
-.kilocode/
-.vscode/
-CLAUDE.md
-
-# Secrets
+# Secrets / credentials
 .env
 .env.*
-
-# Credentials / keys
 *.pem
 *.key
 *.crt
@@ -40,18 +29,25 @@ CLAUDE.md
 credentials*
 service-account*.json
 
-# Other
-PARK/
-nMAPE_test/
-lightning_logs/
+# OS
 .DS_Store
-*.png
-*.pkl
-*.log
-*.csv
-*.ckpt
-*.pt
-*.pth
 
+# IDE / tool configs
+.claude/
+.codex/
+.kilocode/
+.vscode/
+CLAUDE.md
+
+# Project-specific directories
+/building/
+/data/
+/docs/
 /etc/
 /notebooks/
+/papers/
+/paper/
+/tmp/
+/res/
+/PARK/
+lightning_logs/
