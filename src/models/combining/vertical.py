@@ -4,6 +4,7 @@ import warnings
 from typing import List, Optional
 
 import numpy as np
+from scipy.optimize import minimize
 
 from src.utils.metrics import crps_quantile
 
@@ -46,8 +47,98 @@ def _cdf_from_quantiles(
     )
 
 
+def _batch_cdf_eval(x_grid, qvals, tau):
+    """Evaluate CDF at x_grid for all timesteps (vectorized).
+
+    For each row n, computes CDF_n(x) = interp(x, qvals[n], tau)
+    with left=0.0, right=1.0.
+
+    Args:
+        x_grid: Evaluation points, shape (N, G).
+        qvals: Quantile values (sorted), shape (N, Q).
+        tau: Quantile levels, shape (Q,).
+
+    Returns:
+        np.ndarray: CDF values, shape (N, G).
+
+    Example:
+        >>> cdf = _batch_cdf_eval(x_grid, qvals, tau)
+        >>> cdf.shape
+        (50, 200)
+    """
+    Q = qvals.shape[1]
+
+    # Find indices: mask[n, g, q] = (x_grid[n, g] >= qvals[n, q])
+    mask = x_grid[:, :, None] >= qvals[:, None, :]  # (N, G, Q)
+    idx = mask.sum(axis=2) - 1  # (N, G)
+    idx = np.clip(idx, 0, Q - 2)
+
+    row = np.arange(qvals.shape[0])[:, None]
+    x_lo = qvals[row, idx]
+    x_hi = qvals[row, idx + 1]
+    f_lo = tau[idx]
+    f_hi = tau[idx + 1]
+
+    dx = x_hi - x_lo
+    safe_dx = np.where(dx < 1e-15, 1.0, dx)
+    t = np.clip((x_grid - x_lo) / safe_dx, 0.0, 1.0)
+    # For point masses (dx ~ 0): use f_hi (max level), matching
+    # _cdf_from_quantiles which keeps the last (max) level
+    result = np.where(dx < 1e-15, f_hi, f_lo + t * (f_hi - f_lo))
+
+    # Clamp out-of-range
+    result = np.where(x_grid < qvals[:, :1], 0.0, result)
+    result = np.where(x_grid > qvals[:, -1:], 1.0, result)
+
+    return result
+
+
+def _batch_cdf_invert(tau, cdf, x_grid):
+    """Invert combined CDF to get quantiles (vectorized).
+
+    For each row n, computes interp(tau, cdf[n], x_grid[n]).
+
+    Args:
+        tau: Target quantile levels, shape (Q,).
+        cdf: Combined CDF values, shape (N, G).
+        x_grid: x values corresponding to CDF, shape (N, G).
+
+    Returns:
+        np.ndarray: Quantile values, shape (N, Q).
+
+    Example:
+        >>> quantiles = _batch_cdf_invert(tau, combined_cdf, x_grid)
+        >>> quantiles.shape
+        (50, 19)
+    """
+    G = cdf.shape[1]
+    Q = len(tau)
+
+    # Find indices: mask[n, q, g] = (tau[q] >= cdf[n, g])
+    tau_exp = tau[None, :, None]   # (1, Q, 1)
+    cdf_exp = cdf[:, None, :]      # (N, 1, G)
+    mask = tau_exp >= cdf_exp       # (N, Q, G)
+    idx = mask.sum(axis=2) - 1     # (N, Q)
+    idx = np.clip(idx, 0, G - 2)
+
+    row = np.arange(cdf.shape[0])[:, None]
+    cdf_lo = cdf[row, idx]
+    cdf_hi = cdf[row, idx + 1]
+    x_lo = x_grid[row, idx]
+    x_hi = x_grid[row, idx + 1]
+
+    dcdf = cdf_hi - cdf_lo
+    safe_dcdf = np.where(dcdf < 1e-15, 1.0, dcdf)
+    t = np.clip((tau[None, :] - cdf_lo) / safe_dcdf, 0.0, 1.0)
+
+    return x_lo + t * (x_hi - x_lo)
+
+
 def _vertical_combine_quantiles(w, tau, quantile_arrays):
     """Compute combined quantiles via CDF averaging for given weights.
+
+    Vectorized implementation: evaluates all N timesteps in parallel
+    using batch CDF evaluation and inversion, avoiding Python loops.
 
     Args:
         w: Weight vector, shape (M,).
@@ -56,71 +147,45 @@ def _vertical_combine_quantiles(w, tau, quantile_arrays):
 
     Returns:
         np.ndarray: Combined quantile values, shape (N, Q).
-    """
-    N, Q = quantile_arrays[0].shape
-    result = np.empty((N, Q), dtype=float)
-
-    for t in range(N):
-        x_pool = np.concatenate([q[t] for q in quantile_arrays])
-        x_grid = np.unique(x_pool)
-
-        combined_cdf = np.zeros_like(x_grid, dtype=float)
-        for wi, q in zip(w, quantile_arrays):
-            combined_cdf += wi * _cdf_from_quantiles(tau, q[t], x_grid)
-
-        idx = np.searchsorted(combined_cdf, tau, side="left")
-        idx = np.clip(idx, 0, len(x_grid) - 1)
-        result[t] = x_grid[idx]
-
-    return result
-
-
-def _simplex_search(objective, x0, M, n_candidates_base=200, seed=42):
-    """Direct search on the probability simplex for weight optimization.
-
-    Generates candidate weight vectors from a Dirichlet distribution
-    concentrated around ``x0``, evaluates the objective for each, and
-    returns the best. Suitable for piecewise-constant objectives
-    where gradient-based methods fail.
-
-    The number of candidates scales with the simplex dimension
-    (M - 1) to maintain adequate coverage in higher dimensions.
-
-    Args:
-        objective: Callable(w) -> float.
-        x0: Initial weight vector (inverse-CRPS), shape (M,).
-        M: Number of models.
-        n_candidates_base: Base number of candidates for M=2.
-            Actual count = n_candidates_base * (M - 1).
-        seed: RNG seed for reproducibility.
-
-    Returns:
-        np.ndarray: Best weight vector, shape (M,).
 
     Example:
-        >>> best = _simplex_search(obj, x0=np.array([0.6, 0.4]), M=2)
-        >>> best.sum()
-        1.0
+        >>> combined = _vertical_combine_quantiles(
+        ...     np.array([0.6, 0.4]), tau, [q1, q2]
+        ... )
     """
-    rng = np.random.default_rng(seed)
-    n_candidates = n_candidates_base * (M - 1)
+    N, Q = quantile_arrays[0].shape
+    M = len(quantile_arrays)
 
-    # Dirichlet alpha concentrated around x0 (higher = tighter)
-    concentration = 50.0
-    alpha = np.maximum(x0 * concentration, 0.1)
-    candidates = rng.dirichlet(alpha, size=n_candidates)
+    # Stack all quantile arrays: (M, N, Q)
+    all_q = np.stack(quantile_arrays)
 
-    # Always include x0 and equal weights as candidates
-    candidates = np.vstack([x0, np.full(M, 1.0 / M), candidates])
+    # Per-timestep bounds across all models
+    x_min = all_q.min(axis=(0, 2))  # (N,)
+    x_max = all_q.max(axis=(0, 2))  # (N,)
+    span = np.maximum(x_max - x_min, 1e-10)
 
-    scores = np.array([objective(c) for c in candidates])
+    # Build grid: exact quantile positions + uniform interpolation.
+    # Including exact positions ensures CDF round-trips are precise.
+    G_lin = max(5 * Q, 300)
+    t_lin = np.linspace(0.0, 1.0, G_lin)
+    x_lin = x_min[:, None] + t_lin[None, :] * span[:, None]  # (N, G_lin)
 
-    # Filter non-finite scores; fall back to x0 if all are non-finite
-    finite_mask = np.isfinite(scores)
-    if not finite_mask.any():
-        return x0
-    scores[~finite_mask] = np.inf
-    return candidates[np.argmin(scores)]
+    # Exact quantile positions from all models: (N, M*Q)
+    x_exact = all_q.transpose(1, 0, 2).reshape(N, M * Q)
+
+    # Concatenate and sort: (N, G_lin + M*Q)
+    x_grid = np.sort(
+        np.concatenate([x_exact, x_lin], axis=1), axis=1
+    )
+
+    # Weighted CDF averaging over models
+    G = x_grid.shape[1]
+    combined_cdf = np.zeros((N, G), dtype=float)
+    for i in range(M):
+        combined_cdf += w[i] * _batch_cdf_eval(x_grid, all_q[i], tau)
+
+    # Invert combined CDF to get output quantiles
+    return _batch_cdf_invert(tau, combined_cdf, x_grid)
 
 
 def _vertical_objective(w, tau, quantile_arrays, observed, reg_lambda):
@@ -135,6 +200,11 @@ def _vertical_objective(w, tau, quantile_arrays, observed, reg_lambda):
 
     Returns:
         float: CRPS + regularization penalty.
+
+    Example:
+        >>> loss = _vertical_objective(
+        ...     np.array([0.6, 0.4]), tau, qarrays, obs, 0.0
+        ... )
     """
     q_combined = _vertical_combine_quantiles(w, tau, quantile_arrays)
     loss = crps_quantile(tau, q_combined, observed, reduction="mean")
@@ -165,9 +235,9 @@ class VerticalCombiner(BaseCombiner):
         weights: User-specified weights, shape (M,). If None,
             learns weights during fit().
         fit_method: Weight learning strategy.
-            - "optimize": Minimize combined CRPS via derivative-free
-              simplex search (default). Uses Dirichlet-seeded
-              candidates around inverse-CRPS warm start.
+            - "optimize": Minimize combined CRPS via SLSQP (default).
+              CRPS is convex w.r.t. weights (Theorem 3, Taylor &
+              Meng 2025), so SLSQP finds the global optimum.
             - "inverse_crps": Heuristic inverse-CRPS weighting.
         reg_lambda: L2 regularization toward equal weights (default 0.0).
         val_ratio: Fraction of data for temporal validation (default 0.0).
@@ -211,16 +281,14 @@ class VerticalCombiner(BaseCombiner):
     ) -> np.ndarray:
         """Learn combining weights for a single horizon.
 
-        Dispatches to inverse-CRPS heuristic or simplex grid search
+        Dispatches to inverse-CRPS heuristic or SLSQP optimization
         based on ``fit_method``. User-specified weights always take
         precedence.
 
-        The vertical objective is piecewise constant in w due to
-        ``np.searchsorted`` in the CDF inversion step, so gradient-
-        based optimizers (SLSQP) cannot reliably find improvements.
-        Instead, ``fit_method="optimize"`` uses a derivative-free
-        Dirichlet-seeded grid search on the simplex, centered on
-        the inverse-CRPS warm start.
+        The vertical CRPS objective is convex w.r.t. weights
+        (Theorem 3, Taylor & Meng 2025), so SLSQP with
+        finite-difference gradients reliably finds the global
+        optimum from the inverse-CRPS warm start.
 
         Args:
             h: Forecast horizon (1-indexed).
@@ -246,16 +314,38 @@ class VerticalCombiner(BaseCombiner):
         if self.fit_method == "inverse_crps":
             return x0
 
-        # Derivative-free simplex grid search
+        # SLSQP optimization with inverse-CRPS warm start
         M = len(quantile_arrays)
 
-        def objective(w):
-            return _vertical_objective(
-                w, tau, quantile_arrays, observed, self.reg_lambda
-            )
+        result = minimize(
+            _vertical_objective,
+            x0,
+            args=(tau, quantile_arrays, observed, self.reg_lambda),
+            method="SLSQP",
+            bounds=[(0.0, 1.0)] * M,
+            constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1.0}],
+            options={"maxiter": 200, "ftol": 1e-10},
+        )
 
-        best_w = _simplex_search(objective, x0, M)
-        return best_w
+        if not result.success:
+            warnings.warn(
+                f"SLSQP did not converge for horizon {h}: "
+                f"{result.message}. Falling back to inverse-CRPS "
+                f"weights.",
+                stacklevel=2,
+            )
+            return x0
+
+        w_opt = np.maximum(result.x, 0.0)
+        if not np.all(np.isfinite(w_opt)) or w_opt.sum() <= 0:
+            warnings.warn(
+                f"SLSQP returned invalid weights for horizon {h}. "
+                f"Falling back to inverse-CRPS weights.",
+                stacklevel=2,
+            )
+            return x0
+        w_opt /= w_opt.sum()
+        return w_opt
 
     def _combine_distributions(
         self,

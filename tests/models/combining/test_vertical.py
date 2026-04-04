@@ -524,27 +524,22 @@ class TestVerticalOptimize:
         for h in range(1, H + 1):
             np.testing.assert_allclose(combiner.weights_[h], [0.6, 0.4])
 
-    def test_optimize_includes_heuristic_as_candidate(
+    def test_optimize_produces_valid_weights(
         self, basis_index, observed
     ):
-        """Simplex search always includes x0, so result >= heuristic."""
+        """SLSQP optimization produces valid weights."""
         res_a = _make_parametric(basis_index, "A")
         res_b = _make_parametric(basis_index, "B", loc_offset=1.0)
 
-        c_heur = VerticalCombiner(
-            n_quantiles=19, fit_method="inverse_crps"
-        )
         c_opt = VerticalCombiner(
             n_quantiles=19, fit_method="optimize"
         )
-        c_heur.fit([res_a, res_b], observed)
         c_opt.fit([res_a, res_b], observed)
 
-        # Optimized weights are always at least as good as heuristic
-        # because x0 is included in the candidate set
         assert c_opt.is_fitted_
         for h in range(1, H + 1):
             np.testing.assert_allclose(c_opt.weights_[h].sum(), 1.0)
+            assert np.all(c_opt.weights_[h] >= 0)
 
     def test_optimize_three_models(self, basis_index, observed):
         """Optimization works with M > 2 models."""
