@@ -1,5 +1,4 @@
-"""
-Training data pipeline orchestrator.
+"""Training data pipeline orchestrator.
 
 Coordinates:
     1. Resolver creation (per NWP source).
@@ -9,6 +8,7 @@ Coordinates:
     5. Farm-level aggregation from turbine-level data.
 """
 import logging
+import re
 from datetime import datetime
 from typing import Dict, List, Literal
 
@@ -33,27 +33,127 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _recompute_wind_derived(df: pd.DataFrame) -> pd.DataFrame:
+    """Recompute wspd/wdir from averaged U/V components.
+
+    After farm-level averaging, derived wind columns (wspd, wdir) are
+    physically incorrect because they were averaged as scalars.  This
+    function recomputes them from the (correctly averaged) U/V vector
+    components.
+
+    Handles two naming conventions (case-insensitive for U/V lookup):
+        - ECMWF-style: ``{prefix}_forecast_wspd{height}`` from ``u{height}/v{height}``
+        - KMA-style:   ``{prefix}_forecast_wspd`` from ``U-component/V-component``
+    """
+    # Minimum wind speed (m/s) below which direction is undefined.
+    CALM_THRESHOLD = 0.01
+
+    cols = df.columns.tolist()
+
+    # Build a case-insensitive lookup: lowered_name → actual_name
+    col_lower = {c.lower(): c for c in cols}
+
+    def _find_col(name: str):
+        """Find column by case-insensitive match."""
+        return col_lower.get(name.lower())
+
+    def _recompute_wspd_wdir(u_col, v_col, wspd_col, wdir_col):
+        """Recompute wspd and wdir; set wdir=NaN for calm wind."""
+        u = df[u_col].astype(float)
+        v = df[v_col].astype(float)
+        wspd = np.sqrt(u ** 2 + v ** 2)
+        df[wspd_col] = wspd
+        if wdir_col:
+            wdir = (180 + np.degrees(np.arctan2(u, v))) % 360
+            df[wdir_col] = np.where(wspd < CALM_THRESHOLD, 0.0, wdir)
+
+    recomputed = set()
+
+    # ECMWF-style: {prefix}_forecast_wspd{height} ↔ {prefix}_forecast_u{height}
+    for col in cols:
+        m = re.match(r"(.+_forecast_)wspd(\d+)$", col, re.IGNORECASE)
+        if not m:
+            continue
+        prefix, height = m.group(1), m.group(2)
+        u_col = _find_col(f"{prefix}u{height}")
+        v_col = _find_col(f"{prefix}v{height}")
+        if u_col and v_col:
+            wdir_col = _find_col(f"{prefix}wdir{height}")
+            _recompute_wspd_wdir(u_col, v_col, col, wdir_col)
+            recomputed.add(col)
+            if wdir_col:
+                recomputed.add(wdir_col)
+
+    # KMA-style: {prefix}_forecast_wspd ↔ {prefix}_forecast_U-component
+    for col in cols:
+        if col in recomputed:
+            continue
+        m = re.match(r"(.+_forecast_)wspd$", col, re.IGNORECASE)
+        if not m:
+            continue
+        prefix = m.group(1)
+        u_col = _find_col(f"{prefix}U-component")
+        v_col = _find_col(f"{prefix}V-component")
+        if u_col and v_col:
+            wdir_col = _find_col(f"{prefix}wdir")
+            _recompute_wspd_wdir(u_col, v_col, col, wdir_col)
+            recomputed.add(col)
+            if wdir_col:
+                recomputed.add(wdir_col)
+
+    # Warn if any wspd/wdir columns could not be recomputed — these
+    # remain as scalar averages which are physically imprecise but
+    # not necessarily wrong enough to abort the entire farm build
+    # (e.g., a source that only ships wspd/wdir without raw U/V).
+    all_wspd_wdir = [
+        c for c in cols
+        if re.search(r"_forecast_w(spd|dir)", c, re.IGNORECASE)
+    ]
+    unmatched = [c for c in all_wspd_wdir if c not in recomputed]
+    if unmatched:
+        logger.warning(
+            "Wind-derived columns could not be recomputed (no matching "
+            "U/V components found): %s. These remain as scalar averages.",
+            unmatched,
+        )
+
+    return df
+
+
 def aggregate_to_farm(
     turbine_dfs: Dict[str, pd.DataFrame],
 ) -> pd.DataFrame:
     """Average turbine-level DataFrames into a farm-level DataFrame.
 
     Numeric columns are averaged; ``is_valid`` is the AND across all
-    turbines.
+    turbines.  After averaging, wind-derived columns (wspd, wdir) are
+    recomputed from the averaged U/V components to ensure physical
+    correctness.
     """
     if not turbine_dfs:
         raise ValueError("No turbine DataFrames to aggregate")
 
     # Get a common index (intersection of all indices)
     common_index: pd.Index | None = None
+    full_union: pd.Index | None = None
     for df in turbine_dfs.values():
         if common_index is None:
             common_index = df.index
+            full_union = df.index
         else:
             common_index = common_index.intersection(df.index)
+            full_union = full_union.union(df.index)
 
     if common_index is None or common_index.empty:
         raise ValueError("No common time index found across turbine DataFrames.")
+
+    n_dropped = len(full_union) - len(common_index)
+    if n_dropped > 0:
+        logger.warning(
+            "Farm aggregation: %d timestamps dropped (present in some "
+            "turbines but not all). Union=%d, intersection=%d.",
+            n_dropped, len(full_union), len(common_index),
+        )
 
     # Reindex all DataFrames and validate
     is_valid_parts = []
@@ -71,7 +171,8 @@ def aggregate_to_farm(
                 tid, n_missing, bad_cols.to_dict(),
             )
             raise ValueError(
-                f"Turbine '{tid}' has {n_missing} missing values after index alignment. "
+                f"Turbine '{tid}' has {n_missing} missing "
+                f"values after index alignment. "
                 f"Columns with NaN: {bad_cols.to_dict()}"
             )
 
@@ -83,15 +184,24 @@ def aggregate_to_farm(
 
     # Average numeric columns — use numpy mean to preserve the index dtype exactly
     if not numeric_parts:
-        raise ValueError("No numeric data to aggregate after processing 'is_valid' columns.")
+        raise ValueError(
+            "No numeric data to aggregate after "
+            "processing 'is_valid' columns."
+        )
 
     cols = numeric_parts[0].columns
-    stacked = np.stack([df.values for df in numeric_parts], axis=0)  # (n_turbines, n_rows, n_cols)
+    # (n_turbines, n_rows, n_cols)
+    stacked = np.stack(
+        [df.values for df in numeric_parts], axis=0,
+    )
     combined_numeric = pd.DataFrame(
         stacked.mean(axis=0),
         index=common_index,
         columns=cols,
     )
+
+    # Recompute wind-derived columns from averaged U/V components
+    combined_numeric = _recompute_wind_derived(combined_numeric)
 
     # Combine 'is_valid' columns with logical AND
     if is_valid_parts:
@@ -125,6 +235,15 @@ class TrainingDataPipeline:
         config: TrainingDataConfig,
         distance_metric: Literal["euclidean", "haversine"] = "euclidean",
     ):
+        """Initialize pipeline.
+
+        Args:
+            config: Training data configuration.
+            distance_metric: Distance metric for NWP resolution.
+
+        Example:
+            >>> pipeline = TrainingDataPipeline(config)
+        """
         self.config = config
         self.distance_metric = distance_metric
         self._resolvers: Dict[str, AbstractNWPResolver] = {}
@@ -215,12 +334,25 @@ class TrainingDataPipeline:
         nwp_stores = self._load_nwp_stores(turbine_id, scada.index)
 
         if output_format == "per_horizon":
-            out_dir = self.config.output_dir / "per_horizon" / "turbine_level" / f"turbine_{turbine_id}"
-            PerHorizonBuilder().build(scada, self.config, out_dir, nwp_stores=nwp_stores)
+            out_dir = (
+                self.config.output_dir / "per_horizon"
+                / "turbine_level" / f"turbine_{turbine_id}"
+            )
+            PerHorizonBuilder().build(
+                scada, self.config, out_dir,
+                nwp_stores=nwp_stores,
+            )
 
         elif output_format == "continuous":
-            out_path = self.config.output_dir / "continuous" / "turbine_level" / f"turbine_{turbine_id}.csv"
-            ContinuousBuilder().build(scada, self.config, out_path, nwp_stores=nwp_stores)
+            out_path = (
+                self.config.output_dir / "continuous"
+                / "turbine_level"
+                / f"turbine_{turbine_id}.csv"
+            )
+            ContinuousBuilder().build(
+                scada, self.config, out_path,
+                nwp_stores=nwp_stores,
+            )
 
     # ------------------------------------------------------------------
     # Farm-level building (= turbine NWP averaged)
@@ -234,7 +366,9 @@ class TrainingDataPipeline:
         turbine_ids = list(self.config.turbine_info.keys())
         turbine_nwp: Dict[str, List[NWPDataStore]] = {}
         for tid in tqdm(turbine_ids, desc="Loading NWP for turbines"):
-            turbine_nwp[tid] = self._load_nwp_stores(tid, farm_scada_index)
+            turbine_nwp[tid] = self._load_nwp_stores(
+                tid, farm_scada_index,
+            )
         return turbine_nwp
 
     def _make_farm_nwp_provider(
@@ -309,6 +443,7 @@ class TrainingDataPipeline:
                     "turbine_info is empty. Turbine-level builds require "
                     "turbine metadata (lat, lon, hub_height) for NWP resolution."
                 )
+
             for tid in tqdm(turbine_ids, desc="Turbines"):
                 self._build_turbine(tid, output_format)
 

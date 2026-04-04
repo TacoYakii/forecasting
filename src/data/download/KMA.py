@@ -1,16 +1,16 @@
-import requests
 import json
+import logging
 import os
 import time
-import pandas as pd
-from pathlib import Path
-from tqdm import tqdm
 from datetime import datetime
-from typing import Dict, Optional, List, TypedDict
-import logging
+from pathlib import Path
 from threading import Thread
-from dotenv import load_dotenv
+from typing import Dict, List, Optional, TypedDict
 
+import pandas as pd
+import requests
+from dotenv import load_dotenv
+from tqdm import tqdm
 
 load_dotenv() # load .env file
 
@@ -25,8 +25,7 @@ class DownloadProgress(TypedDict):
     last_updated: str
 
 class KMARetriever:
-    """
-    Manage the retrieval of weather forecast data from the Korea Meteorological Administration (KMA) service.
+    """Manage the retrieval of weather forecast data from the Korea Meteorological Administration (KMA) service.
 
     Attributes:
         sv_dir (Path): Directory where the retrieved files will be saved.
@@ -201,8 +200,7 @@ class KMARetriever:
             json.dump(self.progress, f, indent=2)
     
     def _manage_auth_key(self):
-        """
-        Manages the authentication key rotation and daily download limits for API requests.
+        """Manages the authentication key rotation and daily download limits for API requests.
         This method performs the following actions:
         - Resets the daily download counter and switches to the primary authentication key if the date has changed.
         - Switches to the next available authentication key if the daily download limit for the current key is reached.
@@ -213,7 +211,6 @@ class KMARetriever:
             - May cause the process to sleep until the next day if all keys are exhausted.
             - Logs and prints status messages regarding key management.
         """
-        
         now = datetime.now()
 
         # Date change -> reset counter 
@@ -356,34 +353,36 @@ class KMARetriever:
 
 
 if __name__ == "__main__":
+    import json
+
     import pandas as pd
-    import json 
 
-    location = "dongbok"
-    mode = "GDAPS"
-    
-    PROJECT_ROOT = Path(__file__).resolve().parents[3]
-
-    with open(PROJECT_ROOT / "data" / "meta" / "request" / "request_time_range.json", "r") as f:
-        request_time_range = json.load(f)
-
-    with open(PROJECT_ROOT / "data" / "meta" / "request" / "group_information.json", "r") as f:
-        group_information = json.load(f)
+    location_list = ["dongbok", "gasiri"]
+    for location in location_list: 
+        mode = "GDAPS"
         
-    date_range = pd.date_range(request_time_range[location][0], request_time_range[location][1], freq="6h")
+        PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-    for group, info in group_information[mode][location].items():
-        retriever = KMARetriever(
-            sv_dir=str(PROJECT_ROOT / "data" / "original" / location / mode / group),
-            lat=info["coordinate"][0],  
-            lon=info["coordinate"][1], 
-            date_range=date_range,
-        dataset_type=mode,
-        chunk_size=3,
-        additional_settings={
-            "varn": "2009,2002,2003,3005,0,1001,1194",
-            "level": "850,925,950,1000"
-        }
-    )
-    
-    retriever.request()
+        with open(PROJECT_ROOT / "data" / "meta" / "request" / "request_time_range.json", "r") as f:
+            request_time_range = json.load(f)
+
+        with open(PROJECT_ROOT / "data" / "meta" / "request" / "group_information.json", "r") as f:
+            group_information = json.load(f)
+            
+        date_range = pd.date_range(request_time_range[location][0], request_time_range[location][1], freq="6h")
+
+        for group, info in group_information[mode][location].items():
+            retriever = KMARetriever(
+                sv_dir=str(PROJECT_ROOT / "data" / "original" / location / mode / group),
+                lat=info["coordinate"][0],
+                lon=info["coordinate"][1],
+                date_range=date_range,
+                dataset_type=mode,
+                chunk_size=3,
+                additional_settings={
+                    "varn": "2009,2002,2003,3005,0,1001,1194",
+                    "level": "850,925,950,1000",
+                },
+            )
+
+            retriever.request()

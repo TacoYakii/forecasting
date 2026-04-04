@@ -89,8 +89,19 @@ class KMATxtReader(AbstractReader):
             return False
 
     def list_files(self, input_dir: Path) -> List[Path]:
-        """Return sorted list of TXT files in the directory."""
+        """Return sorted list of TXT files in the directory.
+
+        If no TXT files are found directly in *input_dir*, searches
+        one level deeper (e.g. ``GDAPS/A/*.txt``, ``GDAPS/B/*.txt``).
+
+        Example:
+            >>> reader = KMATxtReader()
+            >>> reader.list_files(Path("data/GDAPS"))
+            [PosixPath('data/GDAPS/A/2022010100.txt'), ...]
+        """
         files = list(input_dir.glob("*.txt"))
+        if not files:
+            files = list(input_dir.glob("*/*.txt"))
         return sorted(files, key=lambda p: p.stem)
 
     def _parse_txt(self, file_path: Path) -> pd.DataFrame:
@@ -113,8 +124,20 @@ class KMATxtReader(AbstractReader):
 
         df = pd.DataFrame(data, columns=TXT_COLUMNS)
         df["value"] = pd.to_numeric(df["value"], errors="coerce")
-        df["data_type"] = pd.to_numeric(df["data_type"], errors="coerce").astype(int)
-        df["pressure_level"] = pd.to_numeric(df["pressure_level"], errors="coerce").astype(int)
+        df["data_type"] = pd.to_numeric(df["data_type"], errors="coerce")
+        df["pressure_level"] = pd.to_numeric(df["pressure_level"], errors="coerce")
+
+        # Drop rows where type/level could not be parsed (e.g. headers, corrupt lines)
+        n_before = len(df)
+        df = df.dropna(subset=["data_type", "pressure_level"])
+        n_dropped = n_before - len(df)
+        if n_dropped > 0:
+            logger.warning(
+                "Dropped %d rows with non-numeric data_type/pressure_level "
+                "in %s", n_dropped, file_path,
+            )
+        df["data_type"] = df["data_type"].astype(int)
+        df["pressure_level"] = df["pressure_level"].astype(int)
 
         return df
 

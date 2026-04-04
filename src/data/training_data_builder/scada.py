@@ -32,6 +32,28 @@ def load_scada(
     return df
 
 
+def _validate_hourly_index(index: pd.DatetimeIndex, context: str) -> None:
+    """Verify that a DatetimeIndex has uniform 1-hour spacing.
+
+    Raises:
+        ValueError: If gaps or irregular spacing are detected.
+    """
+    if len(index) < 2:
+        return
+    diffs = index.to_series().diff().dropna()
+    expected = pd.Timedelta(hours=1)
+    irregular = diffs[diffs != expected]
+    if not irregular.empty:
+        n_gaps = len(irregular)
+        first_gap = irregular.index[0]
+        raise ValueError(
+            f"{context}: SCADA index is not uniformly 1-hour spaced. "
+            f"{n_gaps} irregular intervals found (first at {first_gap}, "
+            f"delta={irregular.iloc[0]}). Fill or resample gaps before "
+            f"building training data."
+        )
+
+
 def create_lagged_features(
     scada: pd.DataFrame,
     max_lag: int = 6,
@@ -48,7 +70,12 @@ def create_lagged_features(
 
     Returns:
         DataFrame with lagged features and a single ``is_valid`` column.
+
+    Raises:
+        ValueError: If SCADA index has gaps (non-uniform 1h spacing).
     """
+    _validate_hourly_index(scada.index, "create_lagged_features")
+
     is_valid = scada["is_valid"].copy() if "is_valid" in scada.columns else None
     data = scada.drop(columns=["is_valid"], errors="ignore")
 
@@ -93,7 +120,12 @@ def prepare_target(
 
     Returns:
         DataFrame with ``forecast_time_{col}`` columns and ``is_valid``.
+
+    Raises:
+        ValueError: If SCADA index has gaps (non-uniform 1h spacing).
     """
+    _validate_hourly_index(scada.index, "prepare_target")
+
     is_valid = scada["is_valid"].copy() if "is_valid" in scada.columns else None
     data = scada.drop(columns=["is_valid"], errors="ignore")
 

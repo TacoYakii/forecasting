@@ -1,10 +1,10 @@
-"""
-Coordinate-based NWP resolver for ECMWF-style data.
+"""Coordinate-based NWP resolver for ECMWF-style data.
 
 Selects the nearest lat/lon grid-point directory for each turbine.
 """
 import logging
 import math
+import threading
 from pathlib import Path
 from typing import Dict, List, Literal, Tuple
 
@@ -31,7 +31,11 @@ def _haversine(c1: Tuple[float, float], c2: Tuple[float, float]) -> float:
     lat2, lon2 = math.radians(c2[0]), math.radians(c2[1])
     dlat = lat2 - lat1
     dlon = lon2 - lon1
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2)
+        * math.sin(dlon / 2) ** 2
+    )
     return R * 2 * math.asin(math.sqrt(a))
 
 
@@ -66,6 +70,16 @@ class CoordinateResolver(AbstractNWPResolver):
         distance_metric: Literal["euclidean", "haversine"] = "euclidean",
         drop_columns: list[str] | None = None,
     ):
+        """Initialize resolver.
+
+        Args:
+            turbine_info: Turbine ID → metadata mapping.
+            distance_metric: ``"euclidean"`` or ``"haversine"``.
+            drop_columns: Columns to drop from loaded CSVs.
+
+        Example:
+            >>> resolver = CoordinateResolver(turbine_info)
+        """
         if distance_metric not in _DISTANCE_FUNCTIONS:
             raise ValueError(
                 f"Unknown distance_metric '{distance_metric}'.  "
@@ -78,6 +92,7 @@ class CoordinateResolver(AbstractNWPResolver):
         # Cache: parsed coordinate directories for a given nwp_root
         self._nwp_root_cached: Path | None = None
         self._coord_dirs: List[Tuple[float, float, str]] = []
+        self._cache_lock = threading.Lock()
 
     # -- internal helpers ------------------------------------------------
 
@@ -86,25 +101,33 @@ class CoordinateResolver(AbstractNWPResolver):
         if self._nwp_root_cached == nwp_root:
             return
 
-        coords: List[Tuple[float, float, str]] = []
-        for d in nwp_root.iterdir():
-            if not d.is_dir():
-                continue
-            try:
-                parts = d.name.split("_")
-                lat, lon = float(parts[0]), float(parts[1])
-                coords.append((lat, lon, d.name))
-            except (ValueError, IndexError):
-                continue
+        with self._cache_lock:
+            # Double-check after acquiring lock
+            if self._nwp_root_cached == nwp_root:
+                return
 
-        if not coords:
-            raise FileNotFoundError(
-                f"No coordinate directories found in {nwp_root}"
+            coords: List[Tuple[float, float, str]] = []
+            for d in nwp_root.iterdir():
+                if not d.is_dir():
+                    continue
+                try:
+                    parts = d.name.split("_")
+                    lat, lon = float(parts[0]), float(parts[1])
+                    coords.append((lat, lon, d.name))
+                except (ValueError, IndexError):
+                    continue
+
+            if not coords:
+                raise FileNotFoundError(
+                    f"No coordinate directories found in {nwp_root}"
+                )
+
+            self._coord_dirs = coords
+            self._nwp_root_cached = nwp_root
+            logger.debug(
+                "Cached %d coordinate directories from %s",
+                len(coords), nwp_root,
             )
-
-        self._coord_dirs = coords
-        self._nwp_root_cached = nwp_root
-        logger.debug("Cached %d coordinate directories from %s", len(coords), nwp_root)
 
     # -- interface -------------------------------------------------------
 
@@ -118,8 +141,7 @@ class CoordinateResolver(AbstractNWPResolver):
         basis_time_str: str,
         turbine_id: str,
     ) -> pd.DataFrame:
-        """Find the nearest coordinate directory that contains the
-        requested basis time and load it.
+        """Find nearest coordinate directory and load basis time.
 
         Uses the cached coordinate list to avoid re-scanning the
         directory tree on every call.
@@ -154,7 +176,10 @@ class CoordinateResolver(AbstractNWPResolver):
             self._coord_dirs,
             key=lambda c: self._dist_fn((info.lat, info.lon), (c[0], c[1])),
         )
-        nearest_dist = self._dist_fn((info.lat, info.lon), (nearest_overall[0], nearest_overall[1]))
+        nearest_dist = self._dist_fn(
+            (info.lat, info.lon),
+            (nearest_overall[0], nearest_overall[1]),
+        )
         if best_dir != nearest_overall[2]:
             logger.warning(
                 "Turbine %s @ %s: nearest coord %s (dist=%.4f) missing file, "

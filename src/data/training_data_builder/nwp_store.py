@@ -1,25 +1,23 @@
-"""
-NWPDataStore — load-once cache for NWP data.
+"""NWPDataStore — load-once cache for NWP data.
 
 Reads all required NWP CSVs into a single ``(basis_time, forecast_time)``
 MultiIndex DataFrame.  Subsequent queries for individual horizons or the
 continuous format operate purely in memory.
 """
+import concurrent.futures
 import logging
 import os
-from pathlib import Path
-from typing import Dict, List, Optional
-import concurrent.futures
+from typing import List, Optional
 
 import pandas as pd
-from tqdm.auto import tqdm
 
-from .config import NWPSourceConfig, ScadaConfig, TurbineInfo
+from .config import NWPSourceConfig, ScadaConfig
 from .resolvers.base import AbstractNWPResolver
 from .time_alignment import (
     convert_timezone,
     create_nwp_basis_mapping,
     parse_frequency,
+    snap_to_nwp_basis,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,6 +43,17 @@ class NWPDataStore:
         nwp_tz: str,
         scada_tz: str,
     ):
+        """Initialize NWPDataStore with pre-loaded DataFrame.
+
+        Args:
+            df: MultiIndex DataFrame ``(basis_time, forecast_time)``.
+            nwp_name: NWP source identifier (e.g. ``"ECMWF"``).
+            nwp_tz: Timezone of NWP data (e.g. ``"UTC"``).
+            scada_tz: Timezone of SCADA data (e.g. ``"Asia/Seoul"``).
+
+        Example:
+            >>> store = NWPDataStore(df, "ECMWF", "UTC", "Asia/Seoul")
+        """
         self._df = df
         self.nwp_name = nwp_name
         self.nwp_tz = nwp_tz
@@ -73,17 +82,26 @@ class NWPDataStore:
         """
         data_path = resolver.get_data_path(nwp_config.root, turbine_id)
 
-        # Collect all needed basis_time strings
-        # (We gather them from a full-range mapping so we don't miss any.)
+        # Collect all needed basis_time strings.
+        # We need basis_times for BOTH avoid_exact modes:
+        #   - avoid_exact=True  → horizon=0 queries (prevents leakage)
+        #   - avoid_exact=False → horizon>0 queries (uses exact release boundary)
+        # Without the union, horizon>0 queries at exact NWP release times
+        # would miss their basis_time and fall back to previous-day data.
         mapping = create_nwp_basis_mapping(
             scada_kst_index,
             nwp_config.frequency,
             scada_config.timezone,
             nwp_config.timezone,
         )
-
-        # Only the basis_time keys are needed; the forecast-time lists are unused.
-        basis_times = list(mapping.keys())
+        scada_utc = convert_timezone(
+            scada_kst_index, scada_config.timezone, nwp_config.timezone,
+        )
+        basis_no_avoid = snap_to_nwp_basis(
+            scada_utc, nwp_config.frequency, avoid_exact=False,
+        )
+        extra_keys = set(basis_no_avoid.strftime("%Y-%m-%d_%H"))
+        basis_times = sorted(set(mapping.keys()) | extra_keys)
 
         dfs: List[pd.DataFrame] = []
 
@@ -91,7 +109,9 @@ class NWPDataStore:
 
         def _load_single(basis_time_str: str) -> Optional[pd.DataFrame]:
             try:
-                df_single = resolver.load_basis_time(data_path, basis_time_str, turbine_id)
+                df_single = resolver.load_basis_time(
+                    data_path, basis_time_str, turbine_id,
+                )
                 basis_ts = pd.Timestamp(basis_time_str.replace("_", " "))
                 df_single["basis_time"] = basis_ts
                 return df_single
@@ -102,25 +122,13 @@ class NWPDataStore:
                 logger.warning("Failed to load %s: %s", basis_time_str, e)
                 return None
 
-        # Determine thread count: use minimal CPU impact but high IO concurrency
-        # Because we read tiny CSVs, threading dominates overhead.
-        max_workers = min(32, (os.cpu_count() or 4) * 4)
+        max_workers = min(16, (os.cpu_count() or 4) * 2)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(_load_single, t_str): t_str
-                for t_str in basis_times
-            }
-            
-            for future in tqdm(
-                concurrent.futures.as_completed(futures),
-                total=len(futures),
-                desc=f"[{nwp_config.name}] loading {turbine_id}",
-                leave=False,
-            ):
-                res_df = future.result()
-                if res_df is not None:
-                    dfs.append(res_df)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers,
+        ) as executor:
+            results = list(executor.map(_load_single, basis_times))
+            dfs = [df for df in results if df is not None]
 
         if missing_basis_times:
             missing_sorted = sorted(missing_basis_times)
@@ -155,7 +163,7 @@ class NWPDataStore:
             combined, nwp_config.forecast_interval, scada_config.interval
         )
 
-        # Prefix column names with NWP model name and enforce a single 'forecast_' prefix
+        # Prefix columns with NWP model name; enforce single 'forecast_'
         new_cols = {}
         for c in combined.columns:
             # Remove only the leading 'forecast_' if present
@@ -194,6 +202,8 @@ class NWPDataStore:
         filled_groups = []
         unfillable = []
 
+        future_filled = []
+
         for bt_str in sorted(missing_basis_times):
             bt = pd.Timestamp(bt_str.replace("_", " "))
 
@@ -204,6 +214,7 @@ class NWPDataStore:
                 source_bt = earlier[-1]
             elif not later.empty:
                 source_bt = later[0]
+                future_filled.append((bt_str, str(source_bt)))
             else:
                 unfillable.append(bt_str)
                 continue
@@ -240,6 +251,15 @@ class NWPDataStore:
                 ", ".join(filled_cols),
             )
             df = pd.concat([df] + filled_groups).sort_index()
+
+        if future_filled:
+            logger.warning(
+                "[%s] %d basis_times were filled from a FUTURE cycle "
+                "(no earlier data available — potential look-ahead): %s",
+                nwp_name,
+                len(future_filled),
+                future_filled[:10],
+            )
 
         if unfillable:
             logger.error(
@@ -285,7 +305,10 @@ class NWPDataStore:
             g = g.resample(scada_interval).interpolate(method="linear")
 
             if is_valid_col:
-                is_valid = is_valid.astype("boolean").reindex(g.index).ffill().astype(bool)
+                is_valid = (
+                    is_valid.astype("boolean")
+                    .reindex(g.index).ffill().astype(bool)
+                )
                 g[is_valid_col] = is_valid
 
             g["basis_time"] = basis_time
@@ -322,7 +345,9 @@ class NWPDataStore:
         })
 
         merged = pd.merge(targets, df, on=["basis_time", "forecast_time"], how="left")
-        merged = merged.set_index("scada_kst").drop(columns=["basis_time", "forecast_time"])
+        merged = merged.set_index("scada_kst").drop(
+            columns=["basis_time", "forecast_time"],
+        )
         # pd.merge may coerce the datetime dtype of the index — restore the original
         merged.index = scada_kst_index
         merged = merged.sort_index()
@@ -331,14 +356,19 @@ class NWPDataStore:
         nan_mask = merged.isna().any(axis=1)
         n_missing = int(nan_mask.sum())
         if n_missing > 0:
-            data_cols = [c for c in merged.columns if c != "is_valid"]
+            # Exclude validity columns (may be renamed to e.g. ECMWF_forecast_is_valid)
+            valid_cols = [c for c in merged.columns if "is_valid" in c]
+            data_cols = [c for c in merged.columns if "is_valid" not in c]
             # Try -24h, -48h, -72h, ... expanding until filled
             max_days = len(merged) // 24 + 1
             for day_offset in range(1, max_days + 1):
                 still_nan = merged[data_cols].isna().any(axis=1)
                 if not still_nan.any():
                     break
-                lookup_idx = merged.index[still_nan] - pd.Timedelta(hours=24 * day_offset)
+                lookup_idx = (
+                    merged.index[still_nan]
+                    - pd.Timedelta(hours=24 * day_offset)
+                )
                 fill_vals = merged[data_cols].reindex(lookup_idx)
                 fill_vals.index = merged.index[still_nan]
                 merged.loc[still_nan, data_cols] = fill_vals
@@ -352,14 +382,16 @@ class NWPDataStore:
                 nan_times = merged.index[final_nan].tolist()
                 raise ValueError(
                     f"{self.nwp_name}: horizon={horizon}, "
-                    f"{int(final_nan.sum())} rows could not be filled from any previous day. "
+                    f"{int(final_nan.sum())} rows could not "
+                    f"be filled from any previous day. "
                     f"Columns: {nan_cols}, "
-                    f"Times: {nan_times[:5]}{'...' if len(nan_times) > 5 else ''}. "
-                    f"More NWP data is needed before these dates."
+                    f"Times: {nan_times[:5]}"
+                    f"{'...' if len(nan_times) > 5 else ''}. "
+                    f"More NWP data is needed."
                 )
 
-            if "is_valid" in merged.columns:
-                merged.loc[nan_mask, "is_valid"] = False
+            for vc in valid_cols:
+                merged.loc[nan_mask, vc] = False
 
             logger.warning(
                 "%s: horizon=%d, %d/%d rows filled from previous day (is_valid=False)",
@@ -368,32 +400,6 @@ class NWPDataStore:
 
         return merged
 
-    def get_for_continuous(self) -> pd.DataFrame:
-        """Return NWP data for the continuous (single-file) format.
-
-        For each SCADA timestamp, selects the forecast from the most
-        recent NWP release.  The output is indexed by time in SCADA
-        timezone (KST).
-        """
-        df = self._df.reset_index()
-
-        # Convert forecast_time to SCADA tz for the output
-        df["time"] = convert_timezone(
-            pd.DatetimeIndex(df["forecast_time"]),
-            self.nwp_tz,
-            self.scada_tz,
-        )
-
-        # For each (time), keep the row from the most recent basis_time
-        # (i.e. largest basis_time ≤ corresponding scada-utc time)
-        df = df.sort_values(["time", "basis_time"])
-        df = df.drop_duplicates(subset="time", keep="last")
-
-        df = df.set_index("time").drop(columns=["basis_time", "forecast_time"])
-        df = df.sort_index()
-        return df
-
-
 def merge_nwp_stores(
     stores: List[NWPDataStore],
     nwp_configs: List["NWPSourceConfig"],
@@ -401,14 +407,14 @@ def merge_nwp_stores(
     horizon: int = 0,
     scada_index: Optional[pd.DatetimeIndex] = None,
 ) -> pd.DataFrame:
-    """Merge data from multiple NWP stores.
+    """Merge data from multiple NWP stores for a specific horizon.
 
     Args:
         stores: List of NWPDataStore instances (different NWP sources).
         nwp_configs: List of NWPSourceConfigs corresponding to the stores.
-        mode: ``"per_horizon"`` or ``"continuous"``.
-        horizon: Forecast horizon (only used in ``"per_horizon"`` mode).
-        scada_index: The SCADA timestamps to align to (needed for per_horizon).
+        mode: ``"per_horizon"`` (only supported mode).
+        horizon: Forecast horizon in hours.
+        scada_index: The SCADA timestamps to align to.
 
     Returns:
         Merged DataFrame with columns prefixed by NWP name.
@@ -420,18 +426,14 @@ def merge_nwp_stores(
             f"stores ({len(stores)}) and nwp_configs ({len(nwp_configs)}) "
             f"must have the same length"
         )
+    if mode != "per_horizon":
+        raise ValueError(f"Unsupported mode: {mode!r}. Use 'per_horizon'.")
+    if scada_index is None:
+        raise ValueError("scada_index is required")
 
     dfs = []
     for store, config in zip(stores, nwp_configs):
-        if mode == "per_horizon":
-            if scada_index is None:
-                raise ValueError("scada_index is required for per_horizon mode")
-            dfs.append(store.get_for_horizon(horizon, scada_index, config.frequency))
-
-        elif mode == "continuous":
-            dfs.append(store.get_for_continuous())
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
+        dfs.append(store.get_for_horizon(horizon, scada_index, config.frequency))
 
     merged = pd.concat(dfs, axis=1)
 
@@ -446,14 +448,20 @@ def merge_nwp_stores(
             "(horizon=%d, columns=%s). Filling from previous day.",
             n_nan_rows, horizon, nan_cols,
         )
-        data_cols = [c for c in merged.columns if "is_valid" not in c]
+        data_cols = [
+            c for c in merged.columns if "is_valid" not in c
+        ]
         max_days = len(merged) // 24 + 1
         for day_offset in range(1, max_days + 1):
             still_nan = merged[data_cols].isna().any(axis=1)
             if not still_nan.any():
                 break
-            shifted = merged[data_cols].shift(24 * day_offset, freq="h")
-            merged.loc[still_nan, data_cols] = shifted.loc[still_nan, data_cols]
+            lookup_idx = merged.index[still_nan] - pd.Timedelta(
+                hours=24 * day_offset
+            )
+            fill_vals = merged[data_cols].reindex(lookup_idx)
+            fill_vals.index = merged.index[still_nan]
+            merged.loc[still_nan, data_cols] = fill_vals
 
         final_nan = merged[data_cols].isna().any(axis=1)
         if final_nan.any():
@@ -463,10 +471,12 @@ def merge_nwp_stores(
             nan_times = merged.index[final_nan].tolist()
             raise ValueError(
                 f"merge_nwp_stores: horizon={horizon}, "
-                f"{int(final_nan.sum())} rows could not be filled from any previous day. "
+                f"{int(final_nan.sum())} rows could not "
+                f"be filled from any previous day. "
                 f"Columns: {unfilled_cols}, "
-                f"Times: {nan_times[:5]}{'...' if len(nan_times) > 5 else ''}. "
-                f"More NWP data is needed before these dates."
+                f"Times: {nan_times[:5]}"
+                f"{'...' if len(nan_times) > 5 else ''}. "
+                f"More NWP data is needed."
             )
 
         is_valid_cols = [c for c in merged.columns if "is_valid" in c]

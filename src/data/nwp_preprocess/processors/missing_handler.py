@@ -86,7 +86,9 @@ class MissingHandler:
 
         while remaining_missing:
             past_basis_time = basis_time - pd.Timedelta(days=days_back)
-            past_file = self._find_past_file(past_dir, past_basis_time)
+            past_file = self._find_past_file(
+                past_dir, past_basis_time, current_basis_time=basis_time,
+            )
 
             if past_file is None:
                 # No more past data available
@@ -116,6 +118,11 @@ class MissingHandler:
                     continue
 
                 past_row = past_df.loc[past_idx]
+
+                # Skip rows that were themselves filled (is_valid=False)
+                # to avoid chain-propagation of stale data.
+                if "is_valid" in past_row.index and not past_row["is_valid"]:
+                    continue
 
                 # Check if past row has the data we need
                 missing_cols_for_row = df.loc[idx, data_cols][
@@ -150,12 +157,21 @@ class MissingHandler:
 
     @staticmethod
     def _find_past_file(
-        coord_dir: Path, past_basis_time: pd.Timestamp
+        coord_dir: Path,
+        past_basis_time: pd.Timestamp,
+        current_basis_time: Optional[pd.Timestamp] = None,
     ) -> Optional[Path]:
         """Find a past CSV file for the given basis time.
 
         Tries both YYYY-MM-DD_HH and YYYYMMDDHH filename formats.
+        Skips files with basis_time >= current_basis_time to avoid
+        reading output from the current parallel batch.
         """
+        if (
+            current_basis_time is not None
+            and past_basis_time >= current_basis_time
+        ):
+            return None
         for fmt in ["%Y-%m-%d_%H", "%Y%m%d%H"]:
             candidate = coord_dir / f"{past_basis_time.strftime(fmt)}.csv"
             if candidate.exists():
