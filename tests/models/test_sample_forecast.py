@@ -12,7 +12,7 @@ Models tested:
 import numpy as np
 import pytest
 
-from src.core.forecast_distribution import EmpiricalDistribution
+from src.core.forecast_distribution import SampleDistribution
 from src.core.forecast_results import QuantileForecastResult, SampleForecastResult
 
 from .conftest import Y_COL
@@ -73,7 +73,7 @@ class TestChronosForecaster:
         assert result.horizon == PREDICTION_LENGTH
 
     def test_to_distribution(self, train_df, tmp_path):
-        """to_distribution(h) returns EmpiricalDistribution from samples."""
+        """to_distribution(h) returns SampleDistribution from samples."""
         from src.models.foundation.chronos import ChronosForecaster
 
         model = ChronosForecaster(hyperparameter={
@@ -86,7 +86,7 @@ class TestChronosForecaster:
         result = model.forecast()
 
         dist = result.to_distribution(h=1)
-        assert isinstance(dist, EmpiricalDistribution)
+        assert isinstance(dist, SampleDistribution)
 
     def test_predict_from_context(self, train_df, tmp_path):
         """predict_from_context → SampleForecastResult for rolling use."""

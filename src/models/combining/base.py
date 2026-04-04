@@ -293,7 +293,7 @@ class BaseCombiner(ABC):
         """Extract quantile value arrays for a specific horizon.
 
         Directly reads from QuantileForecastResult.quantiles_data,
-        bypassing EmpiricalDistribution to preserve exact values.
+        bypassing QuantileDistribution to preserve exact values.
 
         Args:
             results: M QuantileForecastResult objects (post-conversion).

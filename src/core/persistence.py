@@ -109,8 +109,7 @@ def _load_single_model(
     """
     model = _create_model_instance(model_cls, hp, display_name)
     model_stem = save_dir / "model" / state / f"{registry_key}_model"
-    model._load_model_specific(model_stem)
-    model.is_fitted_ = True
+    model.load_model(model_stem)
     return model
 
 
@@ -161,8 +160,7 @@ def _load_per_horizon_models(
         model = _create_model_instance(model_cls, hp, display_name)
         h_dir = model_dir / f"horizon_{h}"
         model_stem = h_dir / f"{registry_key}_model"
-        model._load_model_specific(model_stem)
-        model.is_fitted_ = True
+        model.load_model(model_stem)
         models[h] = model
 
     return models

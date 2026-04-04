@@ -79,7 +79,7 @@ class TestDeepARForecaster:
     def test_to_distribution(self, train_df, future_exog, tmp_path):
         """to_distribution returns correct type per loss."""
         from src.models.deep_time_series.deepar import DeepARForecaster
-        from src.core.forecast_distribution import EmpiricalDistribution
+        from src.core.forecast_distribution import QuantileDistribution
 
         hp = {**_FAST_HP, "loss_type": "quantile"}
         model = DeepARForecaster(hyperparameter=hp)
@@ -89,7 +89,7 @@ class TestDeepARForecaster:
         result = model.forecast(future_X=future_X, future_index=future_index)
 
         dist = result.to_distribution(h=1)
-        assert isinstance(dist, EmpiricalDistribution)
+        assert isinstance(dist, QuantileDistribution)
 
 
 # ======================================================================

@@ -39,12 +39,11 @@ def prepare_dataset(
     training_period: Optional[Tuple[Union[str, pd.Timestamp, int], Union[str, pd.Timestamp, int]]] = None, 
     forecast_period: Optional[Tuple[Union[str, pd.Timestamp, int], Union[str, pd.Timestamp, int]]] = None, 
     ) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.Index]:
-    """
-    Prepare training dataset by splitting features and target.
-    
+    """Prepare training dataset by splitting features and target.
+
     Returns:
-        Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.Index, pd.Index]: 
-            (X_train, y_train, X_forecast, y_forecast, base_idx, forecast_idx)
+        Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.Index]:
+            (X_train, y_train, X_forecast, y_forecast, base_idx)
     """
     # Sort dataset by index to ensure chronological order
     dataset = _sort_dataset_by_index(dataset)
