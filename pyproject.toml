@@ -45,7 +45,6 @@ dependencies = [
 
     # high-performance compute
     "numba>=0.60",
-    "jax>=0.4",
 ]
 
 [build-system]
