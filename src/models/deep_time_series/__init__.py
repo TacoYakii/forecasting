@@ -8,6 +8,7 @@ QuantileForecastResult output.
 Available models:
     - DeepARForecaster ("deepar"): Autoregressive RNN with distributional output
     - TFTForecaster ("tft"): Temporal Fusion Transformer with attention
+    - NHITSForecaster ("nhits"): Neural Hierarchical Interpolation (multi-scale)
 
 Usage:
     >>> from src.models.deep_time_series import DeepARForecaster, TFTForecaster
@@ -16,9 +17,11 @@ Usage:
 """
 
 from src.models.deep_time_series.deepar import DeepARForecaster
+from src.models.deep_time_series.nhits import NHITSForecaster
 from src.models.deep_time_series.tft import TFTForecaster
 
 __all__ = [
     "DeepARForecaster",
+    "NHITSForecaster",
     "TFTForecaster",
 ]
