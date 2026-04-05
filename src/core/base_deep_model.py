@@ -41,24 +41,6 @@ _SUPPORTED_DISTRIBUTIONS = [
     "Tweedie", "Bernoulli", "ISQF",
 ]
 
-# Default hyperparameters for all deep learning models.
-# Data-shape, training, and prediction params only.
-# Model architecture params (hidden_size, dropout, etc.) are left to subclasses.
-_DEFAULT_DEEP_HP = {
-    "input_size": -1,               # context window (-1 = auto = 3*h)
-    "prediction_length": 48,        # forecast horizon h
-    "max_steps": 1000,              # training steps
-    "batch_size": 32,
-    "windows_batch_size": 128,          # sliding windows per GPU batch (NF default 1024 -- too large for many exog)
-    "learning_rate": 0.001,
-    "early_stop_patience_steps": -1,  # -1 = disabled
-    "val_size": 0,                  # validation set size (number of timesteps)
-    "level": list(range(2, 100, 2)),  # confidence levels -> 99 quantiles (0.01, ..., 0.99)
-    "scaler_type": "robust",        # NeuralForecast internal scaler
-    "loss_type": None,              # "distribution" | "quantile" | "implicit_quantile" (None = subclass default)
-    "distribution": None,           # for loss_type="distribution": "StudentT", "Normal", etc.
-}
-
 _SERIES_ID = "target"  # unique_id for single-series usage
 
 
@@ -95,6 +77,10 @@ class BaseDeepModel(BaseForecaster):
     Hyperparameters (common):
         input_size (int): Context window. -1 for auto (3*h). Default: -1
         prediction_length (int): Forecast horizon h. Default: 48
+        h_train (int): Truncated BPTT length for recurrent models (DeepAR).
+            -1 = use prediction_length (train on full horizon). Default: -1.
+            NeuralForecast's default of 1 trains only 1-step-ahead, causing
+            severe error compounding during 48-step autoregressive rollout.
         max_steps (int): Training steps. Default: 1000
         batch_size (int): Training batch size. Default: 32
         learning_rate (float): Learning rate. Default: 0.001
@@ -120,27 +106,25 @@ class BaseDeepModel(BaseForecaster):
         hyperparameter: Optional[Dict] = None,
         model_name: Optional[str] = None,
     ):
-        # Merge user hyperparameters with defaults
-        self._deep_hp = dict(_DEFAULT_DEEP_HP)
-        if hyperparameter:
-            self._deep_hp.update(hyperparameter)
+        hp = dict(hyperparameter) if hyperparameter else {}
 
-        # Extract deep-learning-specific keys before passing to super
-        self._input_size: int = int(self._deep_hp.pop("input_size", -1))
-        self._prediction_length: int = int(self._deep_hp.pop("prediction_length", 48))
-        self._max_steps: int = int(self._deep_hp.pop("max_steps", 1000))
-        self._batch_size: int = int(self._deep_hp.pop("batch_size", 32))
-        self._learning_rate: float = float(self._deep_hp.pop("learning_rate", 0.001))
-        self._early_stop: int = int(self._deep_hp.pop("early_stop_patience_steps", -1))
-        self._val_size: int = int(self._deep_hp.pop("val_size", 0))
-        self._level: List[int] = list(self._deep_hp.pop("level", [80, 90]))
-        self._scaler_type: str = str(self._deep_hp.pop("scaler_type", "robust"))
-        self._loss_type: Optional[str] = self._deep_hp.pop("loss_type", None)
-        self._distribution: Optional[str] = self._deep_hp.pop("distribution", None)
+        # Extract keys managed by BaseDeepModel; rest goes to subclass
+        self._input_size: int = int(hp.pop("input_size", -1))
+        self._prediction_length: int = int(hp.pop("prediction_length", 48))
+        self._h_train: int = int(hp.pop("h_train", -1))
+        self._max_steps: int = int(hp.pop("max_steps", 1000))
+        self._batch_size: int = int(hp.pop("batch_size", 32))
+        self._learning_rate: float = float(hp.pop("learning_rate", 0.001))
+        self._early_stop: int = int(hp.pop("early_stop_patience_steps", -1))
+        self._val_size: int = int(hp.pop("val_size", 0))
+        self._level: List[int] = list(hp.pop("level", [80, 90]))
+        self._scaler_type: Optional[str] = hp.pop("scaler_type", None)
+        self._loss_type: Optional[str] = hp.pop("loss_type", None)
+        self._distribution: Optional[str] = hp.pop("distribution", None)
         self._accelerator: str = _resolve_device()
 
-        # Store remaining model-specific hyperparameters for subclasses
-        self._model_hp = dict(self._deep_hp)
+        # Remaining keys are model-specific (architecture params etc.)
+        self._model_hp = hp
 
         # Internal state
         self._nf: Optional[NeuralForecast] = None  # NeuralForecast wrapper
@@ -152,6 +136,7 @@ class BaseDeepModel(BaseForecaster):
 
         # verbose for NeuralForecast fit/predict (default False)
         self.verbose: bool = False
+        self._enable_progress_bar: bool = True
 
         super().__init__(
             hyperparameter=hyperparameter,
@@ -297,7 +282,6 @@ class BaseDeepModel(BaseForecaster):
         self._nf = NeuralForecast(
             models=[model],
             freq=self._freq,
-            logger=False,
         )
         self._nf.fit(
             df=train_df,
@@ -405,13 +389,28 @@ class BaseDeepModel(BaseForecaster):
                 context_df[col] = context_X[:, i]
         context_df = context_df.reset_index(drop=True)
 
-        # Build future exog DataFrame (futr_cols only -- no hist leakage)
+        # Build futr_df for the forecast horizon only.
+        # NeuralForecast 3.x expects futr_df timestamps to match
+        # make_future_dataframe(df) output: the h steps right after
+        # the last timestamp in context_df.
         futr_df = None
-        if future_X is not None and future_index is not None and self.futr_cols:
-            futr_dict = {"unique_id": _SERIES_ID, "ds": future_index}
+        if self.futr_cols and future_X is not None:
+            n_futr = len(self.futr_cols)
+            n_future = future_X.shape[0]
+            # Generate expected future timestamps from context
+            last_ts = context_index[-1]
+            freq = self._freq or "h"
+            expected_ds = pd.date_range(
+                start=last_ts, periods=n_future + 1, freq=freq,
+            )[1:]  # skip last_ts itself
+
+            futr_dict: dict = {
+                "unique_id": _SERIES_ID,
+                "ds": expected_ds,
+            }
             for i, col in enumerate(self.futr_cols):
-                futr_dict[col] = future_X[:, i]
-            futr_df = pd.DataFrame(futr_dict).reset_index(drop=True)
+                futr_dict[col] = future_X[:n_future, i]
+            futr_df = pd.DataFrame(futr_dict)
 
         forecast_df = self._nf.predict(
             df=context_df,

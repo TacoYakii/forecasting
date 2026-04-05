@@ -48,6 +48,14 @@ class DeepARForecaster(BaseDeepModel):
         decoder_hidden_layers (int): Extra MLP decoder layers. Default: 0
         decoder_hidden_size (int): MLP decoder hidden size. Default: 0
 
+    Note:
+        DeepAR is recurrent (RECURRENT=True). NeuralForecast's default
+        ``h_train=1`` trains only 1-step-ahead prediction, causing severe error
+        compounding during multi-step autoregressive rollout at inference.
+        BaseDeepModel overrides this default to ``h_train=prediction_length``
+        when the user passes ``h_train=-1`` (or omits the key), so the model
+        is trained to predict the full horizon jointly.
+
     Example:
         >>> model = DeepARForecaster(
         ...     dataset=df, y_col="power",
@@ -75,18 +83,29 @@ class DeepARForecaster(BaseDeepModel):
             default_distribution="StudentT",
         )
 
+        optional = {}
+        if self._scaler_type is not None:
+            optional["scaler_type"] = self._scaler_type
+
+        # Override NeuralForecast's h_train=1 default: train on full horizon
+        # to avoid error compounding in autoregressive rollout at inference.
+        h_train = (
+            self._h_train if self._h_train > 0 else self._prediction_length
+        )
+
         return DeepAR(
             h=self._prediction_length,
             input_size=self._input_size,
+            h_train=h_train,
             loss=loss,
             valid_loss=valid_loss,
             max_steps=self._max_steps,
             batch_size=self._batch_size,
             learning_rate=self._learning_rate,
             early_stop_patience_steps=self._early_stop,
-            scaler_type=self._scaler_type,
             futr_exog_list=futr_exog,
             hist_exog_list=None,
+            **optional,
             # Model architecture params
             lstm_n_layers=hp.pop("lstm_n_layers", 2),
             lstm_hidden_size=hp.pop("lstm_hidden_size", 128),
@@ -95,5 +114,6 @@ class DeepARForecaster(BaseDeepModel):
             decoder_hidden_layers=hp.pop("decoder_hidden_layers", 0),
             decoder_hidden_size=hp.pop("decoder_hidden_size", 0),
             accelerator=self._accelerator,
+            enable_progress_bar=self._enable_progress_bar,
             **hp,
         )

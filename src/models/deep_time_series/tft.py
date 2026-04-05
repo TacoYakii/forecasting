@@ -72,6 +72,10 @@ class TFTForecaster(BaseDeepModel):
             default_distribution="StudentT",
         )
 
+        optional = {}
+        if self._scaler_type is not None:
+            optional["scaler_type"] = self._scaler_type
+
         return TFT(
             h=self._prediction_length,
             input_size=self._input_size,
@@ -81,9 +85,9 @@ class TFTForecaster(BaseDeepModel):
             batch_size=self._batch_size,
             learning_rate=self._learning_rate,
             early_stop_patience_steps=self._early_stop,
-            scaler_type=self._scaler_type,
             futr_exog_list=futr_exog,
             hist_exog_list=hist_exog,
+            **optional,
             # Model architecture params
             hidden_size=hp.pop("hidden_size", 128),
             n_head=hp.pop("n_head", 4),
@@ -91,5 +95,6 @@ class TFTForecaster(BaseDeepModel):
             attn_dropout=hp.pop("attn_dropout", 0.0),
             n_rnn_layers=hp.pop("n_rnn_layers", 1),
             accelerator=self._accelerator,
+            enable_progress_bar=self._enable_progress_bar,
             **hp,
         )
