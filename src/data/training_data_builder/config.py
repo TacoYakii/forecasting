@@ -3,7 +3,7 @@ Configuration dataclasses for the training data builder pipeline.
 """
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal
+from typing import Dict, List, Literal, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -171,4 +171,32 @@ class TrainingDataConfig:
 
     def __post_init__(self):
         self.output_dir = Path(self.output_dir)
+
+
+@dataclass
+class TemporalHierarchyConfig:
+    """Configuration for temporal hierarchy dataset generation.
+
+    Temporal hierarchy aggregates base per-horizon CSVs into lower-frequency
+    block averages. For frequency *k*, consecutive groups of *k* base horizons
+    are averaged to produce ``max_forecast_horizon / k`` output horizons.
+
+    Attributes:
+        frequencies: Aggregation frequencies. Each must evenly divide
+            ``max_forecast_horizon`` (e.g. ``[1, 2, 4, 6, 12, 24, 48]``
+            for a 48-horizon base).
+        y_col: Target column for observed values.
+        index_col: Column used to align DataFrames across horizons.
+        target_index_col: Column representing the forecast target timestamp.
+        is_valid_col: Boolean validity flag column.
+
+    Example:
+        >>> config = TemporalHierarchyConfig(frequencies=[1, 2, 4, 8, 12, 24, 48])
+    """
+
+    frequencies: List[int]
+    y_col: str = "forecast_time_observed_KPX_pwr"
+    index_col: str = "basis_time"
+    target_index_col: str = "forecast_time"
+    is_valid_col: Optional[str] = "is_valid"
 

@@ -1,5 +1,4 @@
-"""
-Training data builder package.
+"""Training data builder package.
 
 Combines preprocessed NWP CSVs and SCADA data into final training datasets.
 Supports two output formats:
@@ -8,10 +7,11 @@ Supports two output formats:
 """
 
 from .config import (
-    ScadaConfig,
     NWPSourceConfig,
-    TurbineInfo,
+    ScadaConfig,
+    TemporalHierarchyConfig,
     TrainingDataConfig,
+    TurbineInfo,
 )
 from .pipeline import TrainingDataPipeline
 
@@ -20,5 +20,6 @@ __all__ = [
     "NWPSourceConfig",
     "TurbineInfo",
     "TrainingDataConfig",
+    "TemporalHierarchyConfig",
     "TrainingDataPipeline",
 ]

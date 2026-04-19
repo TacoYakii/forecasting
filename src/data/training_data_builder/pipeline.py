@@ -8,8 +8,8 @@ Coordinates:
     5. Farm-level aggregation from turbine-level data.
 """
 import logging
-import re
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Literal
 
 import numpy as np
@@ -18,7 +18,9 @@ from tqdm.auto import tqdm
 
 from .builders.continuous import ContinuousBuilder
 from .builders.per_horizon import PerHorizonBuilder
-from .config import TrainingDataConfig
+from .builders.temporal_hierarchy import TemporalHierarchyBuilder
+from .builders.utils import recompute_wind_derived
+from .config import TemporalHierarchyConfig, TrainingDataConfig
 from .nwp_store import NWPDataStore, merge_nwp_stores
 from .resolvers.base import AbstractNWPResolver
 from .resolvers.coordinate import CoordinateResolver
@@ -32,92 +34,6 @@ logger = logging.getLogger(__name__)
 # Farm-level aggregation
 # ---------------------------------------------------------------------------
 
-
-def _recompute_wind_derived(df: pd.DataFrame) -> pd.DataFrame:
-    """Recompute wspd/wdir from averaged U/V components.
-
-    After farm-level averaging, derived wind columns (wspd, wdir) are
-    physically incorrect because they were averaged as scalars.  This
-    function recomputes them from the (correctly averaged) U/V vector
-    components.
-
-    Handles two naming conventions (case-insensitive for U/V lookup):
-        - ECMWF-style: ``{prefix}_forecast_wspd{height}`` from ``u{height}/v{height}``
-        - KMA-style:   ``{prefix}_forecast_wspd`` from ``U-component/V-component``
-    """
-    # Minimum wind speed (m/s) below which direction is undefined.
-    CALM_THRESHOLD = 0.01
-
-    cols = df.columns.tolist()
-
-    # Build a case-insensitive lookup: lowered_name → actual_name
-    col_lower = {c.lower(): c for c in cols}
-
-    def _find_col(name: str):
-        """Find column by case-insensitive match."""
-        return col_lower.get(name.lower())
-
-    def _recompute_wspd_wdir(u_col, v_col, wspd_col, wdir_col):
-        """Recompute wspd and wdir; set wdir=NaN for calm wind."""
-        u = df[u_col].astype(float)
-        v = df[v_col].astype(float)
-        wspd = np.sqrt(u ** 2 + v ** 2)
-        df[wspd_col] = wspd
-        if wdir_col:
-            wdir = (180 + np.degrees(np.arctan2(u, v))) % 360
-            df[wdir_col] = np.where(wspd < CALM_THRESHOLD, 0.0, wdir)
-
-    recomputed = set()
-
-    # ECMWF-style: {prefix}_forecast_wspd{height} ↔ {prefix}_forecast_u{height}
-    for col in cols:
-        m = re.match(r"(.+_forecast_)wspd(\d+)$", col, re.IGNORECASE)
-        if not m:
-            continue
-        prefix, height = m.group(1), m.group(2)
-        u_col = _find_col(f"{prefix}u{height}")
-        v_col = _find_col(f"{prefix}v{height}")
-        if u_col and v_col:
-            wdir_col = _find_col(f"{prefix}wdir{height}")
-            _recompute_wspd_wdir(u_col, v_col, col, wdir_col)
-            recomputed.add(col)
-            if wdir_col:
-                recomputed.add(wdir_col)
-
-    # KMA-style: {prefix}_forecast_wspd ↔ {prefix}_forecast_U-component
-    for col in cols:
-        if col in recomputed:
-            continue
-        m = re.match(r"(.+_forecast_)wspd$", col, re.IGNORECASE)
-        if not m:
-            continue
-        prefix = m.group(1)
-        u_col = _find_col(f"{prefix}U-component")
-        v_col = _find_col(f"{prefix}V-component")
-        if u_col and v_col:
-            wdir_col = _find_col(f"{prefix}wdir")
-            _recompute_wspd_wdir(u_col, v_col, col, wdir_col)
-            recomputed.add(col)
-            if wdir_col:
-                recomputed.add(wdir_col)
-
-    # Warn if any wspd/wdir columns could not be recomputed — these
-    # remain as scalar averages which are physically imprecise but
-    # not necessarily wrong enough to abort the entire farm build
-    # (e.g., a source that only ships wspd/wdir without raw U/V).
-    all_wspd_wdir = [
-        c for c in cols
-        if re.search(r"_forecast_w(spd|dir)", c, re.IGNORECASE)
-    ]
-    unmatched = [c for c in all_wspd_wdir if c not in recomputed]
-    if unmatched:
-        logger.warning(
-            "Wind-derived columns could not be recomputed (no matching "
-            "U/V components found): %s. These remain as scalar averages.",
-            unmatched,
-        )
-
-    return df
 
 
 def aggregate_to_farm(
@@ -201,7 +117,7 @@ def aggregate_to_farm(
     )
 
     # Recompute wind-derived columns from averaged U/V components
-    combined_numeric = _recompute_wind_derived(combined_numeric)
+    combined_numeric = recompute_wind_derived(combined_numeric)
 
     # Combine 'is_valid' columns with logical AND
     if is_valid_parts:
@@ -454,6 +370,73 @@ class TrainingDataPipeline:
             raise ValueError(f"Unknown level: {level}")
 
         logger.info("Complete: %s / %s", output_format, level)
+
+    def build_temporal_hierarchy(
+        self,
+        hierarchy_config: TemporalHierarchyConfig,
+        source_dir: Path | None = None,
+        output_dir: Path | None = None,
+    ) -> None:
+        """Build temporal hierarchy datasets from existing per-horizon CSVs.
+
+        Args:
+            hierarchy_config: Temporal hierarchy configuration with
+                frequencies and column names.
+            source_dir: Directory containing base ``horizon_N.csv`` files.
+                Defaults to ``{output_dir}/per_horizon/farm_level``.
+            output_dir: Root output directory for hierarchy data.
+                Defaults to ``{output_dir}/temporal_hierarchy``.
+
+        Example:
+            >>> pipeline.build_temporal_hierarchy(
+            ...     TemporalHierarchyConfig(frequencies=[1, 2, 4, 12, 48])
+            ... )
+        """
+        if source_dir is None:
+            source_dir = self.config.output_dir / "per_horizon" / "farm_level"
+        if output_dir is None:
+            output_dir = self.config.output_dir / "temporal_hierarchy"
+
+        TemporalHierarchyBuilder().build(
+            source_dir=source_dir,
+            output_dir=output_dir,
+            max_horizon=self.config.max_forecast_horizon,
+            config=hierarchy_config,
+        )
+
+    def build_temporal_hierarchy_continuous(
+        self,
+        hierarchy_config: TemporalHierarchyConfig,
+        source_path: Path | None = None,
+        output_dir: Path | None = None,
+    ) -> None:
+        """Build temporal hierarchy continuous datasets.
+
+        Block-averages the base continuous CSV at each frequency to
+        produce ``{output_dir}/{freq}.csv``.
+
+        Args:
+            hierarchy_config: Temporal hierarchy configuration.
+            source_path: Path to base continuous CSV.
+                Defaults to ``{output_dir}/continuous/farm_level.csv``.
+            output_dir: Root output directory.
+                Defaults to ``{output_dir}/hierarchy/continuous``.
+
+        Example:
+            >>> pipeline.build_temporal_hierarchy_continuous(
+            ...     TemporalHierarchyConfig(frequencies=[1, 2, 4, 12, 48])
+            ... )
+        """
+        if source_path is None:
+            source_path = self.config.output_dir / "continuous" / "farm_level.csv"
+        if output_dir is None:
+            output_dir = self.config.output_dir / "hierarchy" / "continuous"
+
+        TemporalHierarchyBuilder().build_continuous(
+            source_path=source_path,
+            output_dir=output_dir,
+            config=hierarchy_config,
+        )
 
     def build_all(self) -> None:
         """Build all combinations of format × level."""

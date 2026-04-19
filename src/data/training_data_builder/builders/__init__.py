@@ -1,6 +1,7 @@
 """Builder sub-package — output format generators."""
 
-from .per_horizon import PerHorizonBuilder
 from .continuous import ContinuousBuilder
+from .per_horizon import PerHorizonBuilder
+from .temporal_hierarchy import TemporalHierarchyBuilder
 
-__all__ = ["PerHorizonBuilder", "ContinuousBuilder"]
+__all__ = ["PerHorizonBuilder", "ContinuousBuilder", "TemporalHierarchyBuilder"]
