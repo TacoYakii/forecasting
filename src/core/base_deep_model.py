@@ -86,7 +86,9 @@ class BaseDeepModel(BaseForecaster):
         learning_rate (float): Learning rate. Default: 0.001
         early_stop_patience_steps (int): Early stopping patience. -1 = disabled.
         val_size (int): Validation set size in timesteps. Default: 0
-        level (list[int]): Confidence levels for quantile output. Default: range(2, 100, 2) -> 99 quantiles
+        level (list[int]): Confidence levels for quantile output.
+            Default: [10, 20, ..., 90] (9 levels) -> 19 quantiles
+            (q=0.05, 0.10, ..., 0.95) including median.
         scaler_type (str): NeuralForecast internal scaler. Default: "robust"
 
     Example:
@@ -117,7 +119,9 @@ class BaseDeepModel(BaseForecaster):
         self._learning_rate: float = float(hp.pop("learning_rate", 0.001))
         self._early_stop: int = int(hp.pop("early_stop_patience_steps", -1))
         self._val_size: int = int(hp.pop("val_size", 0))
-        self._level: List[int] = list(hp.pop("level", [80, 90]))
+        self._level: List[int] = list(
+            hp.pop("level", list(range(10, 100, 10)))
+        )
         self._scaler_type: Optional[str] = hp.pop("scaler_type", None)
         self._loss_type: Optional[str] = hp.pop("loss_type", None)
         self._distribution: Optional[str] = hp.pop("distribution", None)
@@ -279,6 +283,12 @@ class BaseDeepModel(BaseForecaster):
         train_df = self._build_nf_dataframe(self.dataset)
         model = self._create_model()
 
+        # Attach an in-memory best-weights tracker callback so that we can
+        # restore the best weights after training. Early stopping by itself
+        # only halts training; without best-weights restore the final
+        # (post-overfit) weights would be used.
+        attached = self._attach_best_checkpoint(model)
+
         self._nf = NeuralForecast(
             models=[model],
             freq=self._freq,
@@ -289,9 +299,97 @@ class BaseDeepModel(BaseForecaster):
             verbose=self.verbose,
         )
 
+        # PyTorch Lightning deep-copies callbacks during Trainer setup, so the
+        # reference we appended pre-fit is NOT the one that received the
+        # training hooks. Retrieve the actual tracker from the fitted model's
+        # trainer_kwargs before restoring best weights.
+        if attached is not None:
+            self._restore_best_checkpoint(
+                self._find_tracker_callback(type(attached))
+            )
+
         self.is_fitted_ = True
 
         return self
+
+    def _find_tracker_callback(self, cb_cls):
+        """Return the in-memory tracker instance held by the fitted model.
+
+        PyTorch Lightning deep-copies callbacks during Trainer setup, so the
+        reference we appended pre-fit is not the one that received hooks.
+        """
+        if self._nf is None or not self._nf.models:
+            return None
+        tk = getattr(self._nf.models[0], "trainer_kwargs", {}) or {}
+        for cb in tk.get("callbacks", []):
+            if isinstance(cb, cb_cls):
+                return cb
+        return None
+
+    def _attach_best_checkpoint(self, model):
+        """Attach an in-memory best-weights tracker callback.
+
+        Only active when val_size > 0 and early stopping is enabled. Uses a
+        custom PyTorch Lightning callback that deep-copies the model's
+        state_dict whenever ``ptl/val_loss`` improves, avoiding the
+        disk-checkpoint + ModelCheckpoint.best_model_path tracking bug that
+        occurs when NeuralForecast wraps the PL Trainer.
+
+        Returns:
+            The callback instance (or None if not attached).
+        """
+        if self._val_size <= 0 or self._early_stop <= 0:
+            return None
+
+        import copy
+
+        from pytorch_lightning.callbacks import Callback
+
+        class _BestWeightsTracker(Callback):
+            """Track the best-val-loss state_dict in memory."""
+
+            def __init__(self, monitor: str = "ptl/val_loss"):
+                super().__init__()
+                self.monitor = monitor
+                self.best_score: float = float("inf")
+                self.best_state_dict = None
+                self.best_step = -1
+
+            def on_validation_end(self, trainer, pl_module) -> None:
+                score = trainer.callback_metrics.get(self.monitor)
+                if score is None:
+                    return
+                score_val = float(score.detach().cpu().item())
+                if score_val < self.best_score:
+                    self.best_score = score_val
+                    self.best_step = int(trainer.global_step)
+                    # deep-copy to CPU so training updates don't mutate it
+                    self.best_state_dict = {
+                        k: v.detach().cpu().clone()
+                        for k, v in pl_module.state_dict().items()
+                    }
+
+        ckpt_cb = _BestWeightsTracker(monitor="ptl/val_loss")
+
+        tk = getattr(model, "trainer_kwargs", None)
+        if tk is None:
+            return None
+        tk.setdefault("callbacks", []).append(ckpt_cb)
+        return ckpt_cb
+
+    def _restore_best_checkpoint(self, ckpt_cb) -> None:
+        """Load the tracked best state_dict into the trained NF model."""
+        if ckpt_cb is None or ckpt_cb.best_state_dict is None:
+            return
+        trained_model = self._nf.models[0]
+        trained_model.load_state_dict(ckpt_cb.best_state_dict, strict=True)
+        if self.verbose:
+            print(
+                f"[{self.nm}] Restored best weights from step "
+                f"{ckpt_cb.best_step}, val_loss={ckpt_cb.best_score:.4f}"
+            )
+        # Free the held state_dict copy.
+        ckpt_cb.best_state_dict = None
 
     # ------------------------------------------------------------------
     # Predict

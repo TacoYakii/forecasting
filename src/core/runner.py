@@ -326,8 +326,8 @@ class RollingRunner:
                         context_X = context_data[all_context_cols].to_numpy()
 
                     if has_futr:
-                        futr_start = t + 1
-                        futr_end = min(t + 1 + horizon, n_total)
+                        futr_start = t
+                        futr_end = min(t + horizon, n_total)
                         futr_data = self._forecast_data.iloc[futr_start:futr_end]
 
                         # Only futr_cols go into future_X (no hist leakage)
@@ -588,6 +588,11 @@ class PerHorizonRunner:
         if not self._horizons:
             raise ValueError(f"No horizon CSV files found in {self.data_dir}")
 
+        # Resolve model class eagerly so joblib subprocesses don't need
+        # the registry (loky spawns fresh processes with an empty registry).
+        from src.core.registry import MODEL_REGISTRY
+        self._model_cls = MODEL_REGISTRY.get(registry_key)
+
         self._models: Dict[int, BaseForecaster] = {}
         self._datasets: Dict[int, pd.DataFrame] = {}
         self.is_fitted_ = False
@@ -633,10 +638,8 @@ class PerHorizonRunner:
 
     def _fit_single_horizon(self, h: int) -> Tuple[int, BaseForecaster, pd.DataFrame]:
         """Train a single horizon model. Returns (h, fitted_model, full_df)."""
-        from src.core.registry import MODEL_REGISTRY
-
         df = self._load_dataset(h)
-        model_cls = MODEL_REGISTRY.get(self.registry_key)
+        model_cls = self._model_cls
 
         train_df = df.loc[self.training_period[0]:self.training_period[1]]
 

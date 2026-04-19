@@ -22,6 +22,7 @@ from .forecast_distribution import (
     DISTRIBUTION_REGISTRY,
     GridDistribution,
     ParametricDistribution,
+    PointDistribution,
     QuantileDistribution,
     SampleDistribution,
 )
@@ -752,6 +753,127 @@ class GridForecastResult(BaseForecastResult):
 
 
 # ---------------------------------------------------------------------------
+# DeterministicForecastResult
+# ---------------------------------------------------------------------------
+
+class DeterministicForecastResult(BaseForecastResult):
+    """Multi-horizon point-forecast container (no distribution).
+
+    Stores only the point summary (mu) per (basis_time, horizon) pair;
+    no distribution parameters, quantiles, or samples. Produced by
+    DeterministicCombiner when combining probabilistic models' point
+    forecasts into a single MAE/MSE-optimal ensemble.
+
+    ``to_distribution(h)`` returns a PointDistribution, so this result
+    is compatible with existing adapters (e.g. ``to_nmape_frames``) and
+    evaluation code that calls ``.mean()`` or ``.ppf(q)``.
+
+    Attributes:
+        mu (np.ndarray): Point forecasts, shape (N, H).
+        basis_index (pd.Index): Time index, length N.
+        model_name (str): Model/combiner name.
+
+    Args:
+        mu: 2-D array of shape (N, H).
+        basis_index: Time index with N entries.
+        model_name: Name of the producing model/combiner.
+
+    Example:
+        >>> import numpy as np, pandas as pd
+        >>> mu = np.random.randn(100, 48)
+        >>> idx = pd.date_range("2024-01-01", periods=100, freq="h")
+        >>> result = DeterministicForecastResult(
+        ...     mu=mu, basis_index=idx, model_name="MAE_ensemble"
+        ... )
+        >>> result.to_distribution(1).mean().shape   # (100,)
+    """
+
+    def __init__(
+        self,
+        mu: np.ndarray,
+        basis_index: pd.Index,
+        model_name: str = "",
+    ):
+        mu = np.asarray(mu, dtype=float)
+        if mu.ndim != 2:
+            raise ValueError(
+                f"mu must be 2-D (N, H), got shape {mu.shape}."
+            )
+        if mu.shape[0] != len(basis_index):
+            raise ValueError(
+                f"mu.shape[0] ({mu.shape[0]}) must match "
+                f"basis_index length ({len(basis_index)})."
+            )
+        if not np.all(np.isfinite(mu)):
+            raise ValueError("mu contains NaN or Inf values.")
+        super().__init__(basis_index, model_name)
+        self.mu = mu
+
+    def _get_horizon(self) -> int:
+        return self.mu.shape[1]
+
+    def _reindex_positions(
+        self, positions: np.ndarray, idx: pd.Index
+    ) -> "DeterministicForecastResult":
+        return DeterministicForecastResult(
+            mu=self.mu[positions],
+            basis_index=idx,
+            model_name=self.model_name,
+        )
+
+    def to_distribution(self, h: int) -> PointDistribution:
+        """Extract a PointDistribution for a specific forecast horizon.
+
+        Args:
+            h: Forecast horizon (1-indexed).
+
+        Returns:
+            PointDistribution with mu[:, h-1] as the point mass.
+
+        Example:
+            >>> dist = result.to_distribution(1)
+            >>> dist.mean().shape    # (N,)
+        """
+        self._validate_h(h)
+        return PointDistribution(
+            mu=self.mu[:, h - 1],
+            index=self.basis_index,
+            base_idx=self.basis_index,
+        )
+
+    def save(self, path: Union[str, Path]) -> Path:
+        """Save result to a directory.
+
+        Args:
+            path: Directory path for saving.
+
+        Returns:
+            Path to the saved directory.
+
+        Example:
+            >>> result.save("res/exp_0/forecast_result")
+        """
+        return _save_forecast_result(self, Path(path))
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "DeterministicForecastResult":
+        """Load result from a directory.
+
+        Args:
+            path: Directory containing saved result files.
+
+        Returns:
+            Loaded DeterministicForecastResult.
+
+        Example:
+            >>> result = DeterministicForecastResult.load(
+            ...     "res/exp_0/forecast_result"
+            ... )
+        """
+        return load_forecast_result(Path(path))
+
+
+# ---------------------------------------------------------------------------
 # Save / Load helpers
 # ---------------------------------------------------------------------------
 
@@ -810,6 +932,10 @@ def _save_forecast_result(result: BaseForecastResult, path: Path) -> Path:
     elif isinstance(result, GridForecastResult):
         metadata["shape"] = list(result.prob.shape)
         np.savez(path / "grid_data.npz", grid=result.grid, prob=result.prob)
+
+    elif isinstance(result, DeterministicForecastResult):
+        metadata["shape"] = list(result.mu.shape)
+        np.savez(path / "params.npz", mu=result.mu)
 
     metadata["basis_index_file"] = "basis_index.csv"
 
@@ -890,6 +1016,14 @@ def load_forecast_result(path: Union[str, Path]) -> BaseForecastResult:
         return GridForecastResult(
             grid=data["grid"],
             prob=data["prob"],
+            basis_index=basis_index,
+            model_name=model_name,
+        )
+
+    if result_type == "DeterministicForecastResult":
+        data = np.load(path / "params.npz")
+        return DeterministicForecastResult(
+            mu=data["mu"],
             basis_index=basis_index,
             model_name=model_name,
         )

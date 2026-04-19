@@ -60,6 +60,10 @@ class _SkewStudentT_gen(stats.rv_continuous):
     def _argcheck(self, df, skew):
         return (df > 2) & (np.abs(skew) < 1)
 
+    def _stats(self, df, skew):
+        """Mean 0 and variance 1 by standardisation (Hansen 1994)."""
+        return 0.0, 1.0, None, None
+
     def _pdf(self, x, df, skew):
         df = np.asarray(df, dtype=float)
         skew = np.asarray(skew, dtype=float)
@@ -1255,10 +1259,152 @@ class GridDistribution:
         }
 
 
+# ---------------------------------------------------------------------------
+# PointDistribution
+# ---------------------------------------------------------------------------
+
+
+class PointDistribution:
+    """Degenerate distribution representing a point forecast.
+
+    All probability mass is concentrated at a single point per time step.
+    Provides the Distribution interface so that DeterministicForecastResult
+    can be consumed by existing adapters (e.g. ``to_nmape_frames``) and by
+    evaluation code that calls ``.mean()`` or ``.ppf(q)``.
+
+    For every quantile level q in (0, 1), ``ppf(q)`` returns the stored
+    point. Standard deviation is identically zero.
+
+    Attributes:
+        mu (np.ndarray): Point forecasts, shape (T,).
+        index (pd.Index): Forecast time index of length T.
+        base_idx (Optional[pd.Index]): Basis time index (original).
+
+    Args:
+        mu: 1-D array of point forecasts, length T.
+        index: Forecast time index of length T.
+        base_idx: Optional basis time index (for to_dataframe()).
+
+    Example:
+        >>> import numpy as np, pandas as pd
+        >>> mu = np.array([1.0, 2.0, 3.0])
+        >>> idx = pd.date_range("2024-01-01", periods=3, freq="h")
+        >>> dist = PointDistribution(mu=mu, index=idx)
+        >>> dist.mean()     # array([1., 2., 3.])
+        >>> dist.ppf(0.5)   # array([1., 2., 3.])
+        >>> dist.std()      # array([0., 0., 0.])
+    """
+
+    def __init__(
+        self,
+        mu: np.ndarray,
+        index: pd.Index,
+        base_idx: Optional[pd.Index] = None,
+    ):
+        mu = np.asarray(mu, dtype=float)
+        if mu.ndim != 1:
+            raise ValueError(f"mu must be 1-D, got shape {mu.shape}.")
+        if len(mu) != len(index):
+            raise ValueError(
+                f"mu length ({len(mu)}) must match index length "
+                f"({len(index)})."
+            )
+        self.mu = mu
+        self.index = index
+        self.base_idx = base_idx
+
+    def __len__(self) -> int:
+        """Number of time steps T."""
+        return len(self.mu)
+
+    def __repr__(self) -> str:
+        return f"PointDistribution(T={len(self)})"
+
+    def mean(self) -> np.ndarray:
+        """Distribution mean for each time step.
+
+        Returns:
+            np.ndarray of shape (T,).
+        """
+        return self.mu
+
+    def std(self) -> np.ndarray:
+        """Standard deviation — always zero for a point distribution.
+
+        Returns:
+            np.ndarray of shape (T,), all zeros.
+        """
+        return np.zeros_like(self.mu)
+
+    def ppf(
+        self, q: Union[float, List[float], np.ndarray]
+    ) -> np.ndarray:
+        """Percent Point Function — returns mu regardless of q.
+
+        All probability mass is at mu, so ppf(q) = mu for every
+        q in (0, 1).
+
+        Args:
+            q: Probability value(s) in [0, 1].
+                - Scalar float: returns shape (T,).
+                - Array of shape (Q,): returns shape (T, Q).
+
+        Returns:
+            np.ndarray: Always mu, broadcast to match q's shape.
+
+        Example:
+            >>> dist.ppf(0.5).shape          # (T,)
+            >>> dist.ppf([0.1, 0.9]).shape   # (T, 2)
+        """
+        q_arr = np.asarray(q, dtype=float)
+        scalar_input = q_arr.ndim == 0
+        if scalar_input:
+            return self.mu.copy()
+        Q = len(q_arr.ravel())
+        return np.broadcast_to(self.mu[:, None], (len(self.mu), Q)).copy()
+
+    def interval(
+        self, coverage: float = 0.9
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Prediction interval — degenerate (lower == upper == mu).
+
+        Args:
+            coverage: Interval coverage probability (ignored).
+
+        Returns:
+            Tuple (lower, upper), each shape (T,), both equal to mu.
+
+        Example:
+            >>> lo, hi = dist.interval(coverage=0.9)
+            >>> np.array_equal(lo, hi)   # True
+        """
+        return self.mu.copy(), self.mu.copy()
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Convert to a DataFrame with columns: mu, std.
+
+        Follows the same contract as ParametricDistribution,
+        SampleDistribution, QuantileDistribution, GridDistribution.
+        std column is all zeros.
+
+        Returns:
+            pd.DataFrame with index=self.index.
+
+        Example:
+            >>> df = dist.to_dataframe()
+            >>> df.columns.tolist()  # ['mu', 'std'] or ['basis_time', 'mu', 'std']
+        """
+        data: Dict[str, Any] = {"mu": self.mu, "std": np.zeros_like(self.mu)}
+        if self.base_idx is not None:
+            data = {"basis_time": self.base_idx, **data}
+        return pd.DataFrame(data, index=self.index)
+
+
 __all__ = [
     "DISTRIBUTION_REGISTRY",
     "ParametricDistribution",
     "SampleDistribution",
     "QuantileDistribution",
     "GridDistribution",
+    "PointDistribution",
 ]

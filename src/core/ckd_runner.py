@@ -14,6 +14,7 @@ Pipeline per horizon h:
 All horizons are independent and can run in parallel via n_jobs.
 """
 
+import pickle
 import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
@@ -265,3 +266,94 @@ class CKDRunner:
             seed=seed,
         )
         return h, gd
+
+    # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
+
+    def save(self, path: Path) -> Path:
+        """Save fitted CKDRunner state (per-horizon models) to a pickle file.
+
+        Persists all fitted CKD models and runner metadata so that
+        ``run()`` can be called immediately after ``load()`` without
+        re-fitting.
+
+        Args:
+            path: Destination file path. ``.pkl`` suffix is added
+                automatically if not present.
+
+        Returns:
+            The resolved file path (with ``.pkl`` suffix).
+
+        Raises:
+            RuntimeError: If the runner has not been fitted.
+
+        Example:
+            >>> runner.fit_hyperparameters(val_results, val_y)
+            >>> saved = runner.save(Path("ckd_runner"))
+        """
+        if not self.is_fitted_:
+            raise RuntimeError("Cannot save an unfitted runner.")
+
+        path = Path(path).with_suffix(".pkl")
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Serialize each CKD model via its own state dict
+        model_states: Dict[str, object] = {}
+        if self.models_:
+            for h, model in self.models_.items():
+                model_states[h] = model
+        elif hasattr(self, "_shared_model"):
+            model_states["shared"] = self._shared_model
+
+        state = {
+            "base_config": self.base_config.to_dict(),
+            "x_columns": self.x_columns,
+            "model_name": self.model_name,
+            "models": model_states,
+        }
+        with open(path, "wb") as f:
+            pickle.dump(state, f)
+        return path
+
+    @classmethod
+    def load(cls, path: Path) -> "CKDRunner":
+        """Load a fitted CKDRunner from a pickle file.
+
+        Restores all per-horizon CKD models so that ``run()`` can be
+        called immediately without re-fitting or re-providing training
+        data.
+
+        Args:
+            path: Source file path (``.pkl`` suffix added if missing).
+
+        Returns:
+            A fitted CKDRunner instance ready for ``run()``.
+
+        Example:
+            >>> runner = CKDRunner.load(Path("ckd_runner.pkl"))
+            >>> result = runner.run(test_results=[ws_test])
+        """
+        path = Path(path).with_suffix(".pkl")
+        with open(path, "rb") as f:
+            state = pickle.load(f)
+
+        config = CKDConfig(**state["base_config"])
+
+        # Create runner with dummy training data (not needed for apply)
+        runner = cls(
+            x_obs=np.empty((0, config.n_x_vars)),
+            y_obs=np.empty(0),
+            x_columns=state["x_columns"],
+            base_config=config,
+            model_name=state["model_name"],
+        )
+
+        model_states = state["models"]
+        if "shared" in model_states:
+            runner._shared_model = model_states["shared"]
+        else:
+            runner.models_ = model_states
+
+        runner.is_fitted_ = True
+        return runner
