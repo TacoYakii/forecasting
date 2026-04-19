@@ -1,5 +1,4 @@
-"""
-TFT forecaster: NeuralForecast Temporal Fusion Transformer wrapper.
+"""TFT forecaster: NeuralForecast Temporal Fusion Transformer wrapper.
 
 TFT is an attention-based architecture for interpretable multi-horizon
 forecasting. It uses variable selection networks, static enrichment, and
@@ -14,14 +13,14 @@ Reference:
 """
 
 from neuralforecast.models import TFT
+
 from src.core.base_deep_model import BaseDeepModel
 from src.core.registry import MODEL_REGISTRY
 
 
 @MODEL_REGISTRY.register_model(name="tft")
 class TFTForecaster(BaseDeepModel):
-    """
-    Temporal Fusion Transformer probabilistic forecaster.
+    """Temporal Fusion Transformer probabilistic forecaster.
 
     Wraps NeuralForecast TFT with the unified BaseDeepModel interface.
     Produces QuantileForecastResult output.

@@ -9,6 +9,9 @@ Available models:
     - DeepARForecaster ("deepar"): Autoregressive RNN with distributional output
     - TFTForecaster ("tft"): Temporal Fusion Transformer with attention
     - NHITSForecaster ("nhits"): Neural Hierarchical Interpolation (multi-scale)
+    - BiTCNForecaster ("bitcn"): Bidirectional Temporal Conv Network (dilated CNN)
+    - TSMixerxForecaster ("tsmixerx"): MLP-Mixer for time series with exogenous
+    - TimesNetForecaster ("timesnet"): 2D CNN on FFT-decomposed series
 
 Usage:
     >>> from src.models.deep_time_series import DeepARForecaster, TFTForecaster
@@ -16,12 +19,18 @@ Usage:
     >>> result = model.predict()  # → QuantileForecastResult
 """
 
+from src.models.deep_time_series.bitcn import BiTCNForecaster
 from src.models.deep_time_series.deepar import DeepARForecaster
 from src.models.deep_time_series.nhits import NHITSForecaster
 from src.models.deep_time_series.tft import TFTForecaster
+from src.models.deep_time_series.timesnet import TimesNetForecaster
+from src.models.deep_time_series.tsmixerx import TSMixerxForecaster
 
 __all__ = [
+    "BiTCNForecaster",
     "DeepARForecaster",
     "NHITSForecaster",
     "TFTForecaster",
+    "TimesNetForecaster",
+    "TSMixerxForecaster",
 ]
