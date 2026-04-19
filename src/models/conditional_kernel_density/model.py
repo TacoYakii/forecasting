@@ -9,7 +9,9 @@ data statistics.  Hyperparameter optimization is handled externally
 (Optuna via CKDOptunaTrainer).
 """
 
+import pickle
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -559,3 +561,95 @@ class ConditionalKernelDensity:
         if self.y_search_range_ != (0.0, 0.0):
             result["y_search_range"] = self.y_search_range_
         return result
+
+    # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
+
+    def save(self, path: Path) -> Path:
+        """Save the fitted model state to a pickle file.
+
+        Persists the density tensor, grid bases, bandwidths, and all
+        metadata needed to restore the model for ``apply()`` without
+        re-fitting on training data.
+
+        Args:
+            path: Destination file path. ``.pkl`` suffix is added
+                automatically if not present.
+
+        Returns:
+            The resolved file path (with ``.pkl`` suffix).
+
+        Raises:
+            RuntimeError: If the model has not been fitted.
+
+        Example:
+            >>> model.build(x_train, y_train, ["wind_speed"])
+            >>> saved = model.save(Path("ckd_model"))
+        """
+        if not self.is_fitted:
+            raise RuntimeError("Cannot save an unfitted model.")
+
+        path = Path(path).with_suffix(".pkl")
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        state = {
+            "config": self.config.to_dict(),
+            "x_columns": self.x_columns,
+            "n_x": self.n_x,
+            "time_decay_factor": self.time_decay_factor,
+            "x_bandwidths": self.x_bandwidths,
+            "y_bandwidth": self.y_bandwidth,
+            "_bandwidths_injected": self._bandwidths_injected,
+            "density": self.density,
+            "y_basis": self.y_basis,
+            "x_basis_list": self.x_basis_list,
+            "x_stats_": self.x_stats_,
+            "y_stats_": self.y_stats_,
+            "x_search_ranges_": self.x_search_ranges_,
+            "y_search_range_": self.y_search_range_,
+        }
+        with open(path, "wb") as f:
+            pickle.dump(state, f)
+        return path
+
+    @classmethod
+    def load(cls, path: Path) -> "ConditionalKernelDensity":
+        """Load a fitted model from a pickle file.
+
+        Restores the full model state so that ``apply()`` can be called
+        immediately without re-fitting.
+
+        Args:
+            path: Source file path (``.pkl`` suffix added if missing).
+
+        Returns:
+            A fitted ConditionalKernelDensity instance.
+
+        Example:
+            >>> model = ConditionalKernelDensity.load(Path("ckd_model.pkl"))
+            >>> gd = model.apply([wind_speed_samples])
+        """
+        path = Path(path).with_suffix(".pkl")
+        with open(path, "rb") as f:
+            state = pickle.load(f)
+
+        config = CKDConfig(**state["config"])
+        model = cls(config)
+
+        model.x_columns = state["x_columns"]
+        model.n_x = state["n_x"]
+        model.time_decay_factor = state["time_decay_factor"]
+        model.x_bandwidths = state["x_bandwidths"]
+        model.y_bandwidth = state["y_bandwidth"]
+        model._bandwidths_injected = state["_bandwidths_injected"]
+        model.density = state["density"]
+        model.y_basis = state["y_basis"]
+        model.x_basis_list = state["x_basis_list"]
+        model.x_stats_ = state["x_stats_"]
+        model.y_stats_ = state["y_stats_"]
+        model.x_search_ranges_ = state["x_search_ranges_"]
+        model.y_search_range_ = state["y_search_range_"]
+        model.is_fitted = True
+
+        return model
