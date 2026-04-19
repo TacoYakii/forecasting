@@ -497,7 +497,8 @@ class TestCombinedMean:
             mean_b = res_b.to_distribution(h).mean()
             expected = w[0] * mean_a + w[1] * mean_b
             actual = combined.to_distribution(h).mean()
-            np.testing.assert_allclose(actual, expected, rtol=0.05)
+            # Sampling-based combine: wider tolerance than grid-based
+            np.testing.assert_allclose(actual, expected, rtol=0.15, atol=0.05)
 
     def test_mean_three_models(self, basis_index, observed):
         """Mean property holds for 3 models."""
@@ -518,7 +519,8 @@ class TestCombinedMean:
             mean_c = res_c.to_distribution(h).mean()
             expected = w[0] * mean_a + w[1] * mean_b + w[2] * mean_c
             actual = combined.to_distribution(h).mean()
-            np.testing.assert_allclose(actual, expected, rtol=0.05)
+            # Sampling-based combine: wider tolerance than grid-based
+            np.testing.assert_allclose(actual, expected, rtol=0.15, atol=0.05)
 
 
 # ---------------------------------------------------------------------------
@@ -800,7 +802,8 @@ class TestIdenticalModels:
         for degree in [0.0, 45.0, 90.0]:
             w = np.array([0.5, 0.5])
             combiner = AngularCombiner(
-                n_quantiles=99, weights=w, degree=degree
+                n_quantiles=99, weights=w, degree=degree,
+                n_samples=10000,
             )
             combiner.fit([res_a, res_b], observed)
             combined = combiner.combine([res_a, res_b])
@@ -814,8 +817,9 @@ class TestIdenticalModels:
                 comb = np.column_stack(
                     [combined.quantiles_data[q][:, h - 1] for q in ql]
                 )
+                # Sampling approximation: use atol for near-zero values
                 np.testing.assert_allclose(
-                    comb, orig, rtol=0.02,
+                    comb, orig, rtol=0.05, atol=0.05,
                     err_msg=f"Failed at degree={degree}, h={h}",
                 )
 
@@ -836,7 +840,8 @@ class TestEdgeCases:
 
         for degree in [0.0, 30.0]:
             combiner = AngularCombiner(
-                n_quantiles=99, weights=w, degree=degree
+                n_quantiles=99, weights=w, degree=degree,
+                n_samples=10000,
             )
             combiner.fit([res_a, res_b], observed)
             combined = combiner.combine([res_a, res_b])
@@ -850,8 +855,9 @@ class TestEdgeCases:
                 comb = np.column_stack(
                     [combined.quantiles_data[q][:, h - 1] for q in ql]
                 )
+                # Sampling approximation: atol for near-zero values
                 np.testing.assert_allclose(
-                    comb, orig, rtol=0.02,
+                    comb, orig, rtol=0.05, atol=0.05,
                     err_msg=f"Failed at degree={degree}, h={h}",
                 )
 

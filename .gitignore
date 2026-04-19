@@ -17,6 +17,7 @@ wheels/
 *.png
 *.jpg
 *.jpeg
+*.tar
 
 # Secrets / credentials
 .env
@@ -28,6 +29,10 @@ wheels/
 *.pfx
 credentials*
 service-account*.json
+
+
+# bash scripts 
+*.sh 
 
 # OS
 .DS_Store
@@ -51,3 +56,10 @@ CLAUDE.md
 /res/
 /PARK/
 lightning_logs/
+
+/new_forecast_res/
+/VPPLAB/
+/new_forecast_res_normalized/
+/CKD_forecast_res/
+/todo/
+/scripts/

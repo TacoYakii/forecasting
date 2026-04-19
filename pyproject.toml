@@ -91,9 +91,6 @@ markers = [
 ]
 
 # ── ruff ─────────────────────────────────────
-[tool.ruff]
-line-length = 88
-
 [tool.ruff.lint]
 select = ["E", "F", "I", "D"]
 ignore = ["D100", "D104"]
