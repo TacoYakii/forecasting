@@ -1,14 +1,301 @@
-"""Vertical combining: CDF weighted average (Linear Pool)."""
+"""Vertical combining: CDF weighted average (Linear Pool).
+
+Provides two implementations:
+- **Sampling-based** (default): Uses the simulation algorithm from
+  Taylor & Meng (2025, Appendix C). Vertical combining is a mixture
+  distribution, so sampling is trivial. Angular combining applies
+  the h_θ quantile transform before mixture sampling.
+- **Grid-based** (legacy): Evaluates CDFs on a common x-grid, computes
+  the weighted CDF average, and inverts. Retained as ``*_grid``
+  functions for reference and regression testing.
+"""
 
 import warnings
 from typing import List, Optional
 
 import numpy as np
+from numba import njit, prange
 from scipy.optimize import minimize
 
 from src.utils.metrics import crps_quantile
 
 from .base import BaseCombiner
+
+# ── Efficiency thresholds for angular dispatch ──
+# float64 cancellation error is ~6e-15 even at θ=1°, so these
+# thresholds exist purely to skip redundant computation.
+HORIZ_THRESH = 1.0  # degrees: θ < 1° → horizontal quantile average
+VERT_THRESH = 89.0  # degrees: θ > 89° → vertical (no h_θ transform)
+
+
+# =====================================================================
+# Numba JIT kernel for mixture interpolation
+# =====================================================================
+
+
+@njit(cache=True, parallel=True)
+def _interp_mixture_kernel(j, u, tau, all_q, s):
+    """Fused model selection + quantile interpolation (Numba JIT).
+
+    For each (n, i), computes s[n, i] = interp(u[n, i], tau, all_q[j[n,i], n, :])
+    using binary search + linear interpolation, parallelized over N timesteps.
+
+    Args:
+        j: Model indices, shape (N, n_samples), dtype int64.
+        u: Uniform draws, shape (N, n_samples), dtype float64.
+        tau: Quantile levels (sorted), shape (Q,), dtype float64.
+        all_q: Stacked quantile arrays, shape (M, N, Q), dtype float64.
+        s: Output array, shape (N, n_samples), dtype float64. Modified in-place.
+    """
+    N, n_samples = j.shape
+    Q = tau.shape[0]
+    for n in prange(N):
+        for i in range(n_samples):
+            m = j[n, i]
+            ui = u[n, i]
+
+            # Clamp to endpoints
+            if ui <= tau[0]:
+                s[n, i] = all_q[m, n, 0]
+                continue
+            if ui >= tau[Q - 1]:
+                s[n, i] = all_q[m, n, Q - 1]
+                continue
+
+            # Binary search: find lo such that tau[lo] <= ui < tau[lo+1]
+            lo = 0
+            hi = Q - 1
+            while hi - lo > 1:
+                mid = (lo + hi) >> 1
+                if tau[mid] <= ui:
+                    lo = mid
+                else:
+                    hi = mid
+
+            # Linear interpolation
+            t = (ui - tau[lo]) / (tau[hi] - tau[lo])
+            s[n, i] = all_q[m, n, lo] + t * (all_q[m, n, hi] - all_q[m, n, lo])
+
+
+@njit(cache=True, parallel=True)
+def _extract_quantiles(s_sorted, tau, out):
+    """Extract quantiles from pre-sorted samples via linear interpolation.
+
+    Replaces np.percentile for sorted arrays. For each row n,
+    maps tau levels to fractional indices in s_sorted[n] and
+    linearly interpolates.
+
+    Args:
+        s_sorted: Sorted samples, shape (N, n_samples), dtype float64.
+        tau: Quantile levels in (0, 1), shape (Q,), dtype float64.
+        out: Output array, shape (N, Q), dtype float64. Modified in-place.
+    """
+    N, S = s_sorted.shape
+    Q = tau.shape[0]
+    for n in prange(N):
+        for q in range(Q):
+            # Map tau to fractional index in [0, S-1]
+            idx_f = tau[q] * (S - 1)
+            lo = int(idx_f)
+            if lo >= S - 1:
+                out[n, q] = s_sorted[n, S - 1]
+            else:
+                frac = idx_f - lo
+                out[n, q] = s_sorted[n, lo] + frac * (s_sorted[n, lo + 1] - s_sorted[n, lo])
+
+
+# =====================================================================
+# Sampling-based combining (Taylor & Meng 2025, Appendix C)
+# =====================================================================
+
+
+def _sampling_combine(
+    weights: np.ndarray,
+    tau: np.ndarray,
+    quantile_arrays: List[np.ndarray],
+    degree_deg: float = 90.0,
+    n_samples: int = 5000,
+    rng_seed: int = 42,
+) -> np.ndarray:
+    """Combine quantile arrays via mixture sampling.
+
+    Implements the simulation algorithm from Taylor & Meng (2025,
+    Online Appendix C) for angular combining, with vertical (θ=90°)
+    and horizontal (θ=0°) as special cases.
+
+    For θ > 89° (vertical): pure mixture sampling, no transform.
+    For 1° ≤ θ ≤ 89° (angular): h_θ shift → mixture sample → sort → h_{-θ}.
+    For θ < 1° (horizontal): quantile function weighted average.
+
+    Args:
+        weights: Model weights, shape (M,), summing to 1.
+        tau: Quantile levels, shape (Q,).
+        quantile_arrays: M arrays of shape (N, Q), one per model.
+        degree_deg: Angle in degrees [0, 90]. 90 = vertical, 0 = horizontal.
+        n_samples: Number of Monte Carlo samples per timestep.
+        rng_seed: Random seed for reproducibility.
+
+    Returns:
+        Combined quantile values, shape (N, Q).
+
+    Example:
+        >>> combined = _sampling_combine(
+        ...     np.array([0.6, 0.4]), tau, [q1, q2],
+        ...     degree_deg=90.0, n_samples=5000,
+        ... )
+    """
+    N, Q = quantile_arrays[0].shape
+    M = len(quantile_arrays)
+
+    # θ < 1°: horizontal — simple weighted average (no sampling needed)
+    if degree_deg < HORIZ_THRESH:
+        result = np.zeros((N, Q), dtype=float)
+        for w, qa in zip(weights, quantile_arrays):
+            result += w * qa
+        return result
+
+    rng = np.random.default_rng(rng_seed)
+
+    # ① Model selection: j(i) ~ Categorical(w)
+    j = rng.choice(M, size=(N, n_samples), p=weights)
+
+    # ② Uniform draws for quantile inversion
+    u = rng.uniform(0, 1, size=(N, n_samples))
+
+    # ③ Quantile interpolation: F_{j(i)}⁻¹(u(i))  [Numba JIT]
+    all_q = np.ascontiguousarray(np.stack(quantile_arrays))  # (M, N, Q)
+    s = np.empty((N, n_samples), dtype=np.float64)
+    _interp_mixture_kernel(j, u, tau, all_q, s)
+
+    # 1° ≤ θ ≤ 89°: h_θ shift
+    apply_transform = degree_deg <= VERT_THRESH
+    if apply_transform:
+        tan_theta = np.tan(np.deg2rad(degree_deg))
+        s += u / tan_theta
+
+    # ④ Sort
+    s.sort(axis=1)
+
+    # ⑤ 1° ≤ θ ≤ 89°: h_{-θ} inverse transform
+    if apply_transform:
+        ranks = np.arange(1, n_samples + 1) / n_samples
+        s -= ranks[np.newaxis, :] / tan_theta
+
+    # ⑥ Extract output quantiles  [Numba JIT]
+    out = np.empty((N, Q), dtype=np.float64)
+    _extract_quantiles(s, tau, out)
+    return out
+
+
+def _sampling_combine_crn(
+    weights: np.ndarray,
+    tau: np.ndarray,
+    quantile_arrays: List[np.ndarray],
+    degree_deg: float,
+    fixed_u: np.ndarray,
+    fixed_v: np.ndarray,
+) -> np.ndarray:
+    """Sampling combine with Common Random Numbers for optimization.
+
+    Uses pre-drawn uniform variates so that the objective is
+    deterministic w.r.t. weights, enabling gradient-based optimizers.
+
+    Args:
+        weights: Model weights, shape (M,), summing to 1.
+        tau: Quantile levels, shape (Q,).
+        quantile_arrays: M arrays of shape (N, Q).
+        degree_deg: Angle in degrees [0, 90].
+        fixed_u: Pre-drawn U(0,1) for quantile inversion, shape (N, S).
+        fixed_v: Pre-drawn U(0,1) for model selection, shape (N, S).
+
+    Returns:
+        Combined quantile values, shape (N, Q).
+
+    Example:
+        >>> rng = np.random.default_rng(42)
+        >>> fixed_u = rng.uniform(0, 1, size=(N, 5000))
+        >>> fixed_v = rng.uniform(0, 1, size=(N, 5000))
+        >>> combined = _sampling_combine_crn(
+        ...     weights, tau, qarrays, 90.0, fixed_u, fixed_v
+        ... )
+    """
+    N, Q = quantile_arrays[0].shape
+    M = len(quantile_arrays)
+    n_samples = fixed_u.shape[1]
+
+    # θ < 1°: horizontal
+    if degree_deg < HORIZ_THRESH:
+        result = np.zeros((N, Q), dtype=float)
+        for w, qa in zip(weights, quantile_arrays):
+            result += w * qa
+        return result
+
+    # ① Deterministic model selection from fixed_v and current weights
+    cum_w = np.cumsum(weights)
+    cum_w[-1] = 1.0  # ensure no floating-point overshoot
+    j = np.searchsorted(cum_w, fixed_v)  # (N, n_samples)
+    j = np.clip(j, 0, M - 1)
+
+    # ③ Quantile interpolation  [Numba JIT]
+    all_q = np.ascontiguousarray(np.stack(quantile_arrays))  # (M, N, Q)
+    s = np.empty((N, n_samples), dtype=np.float64)
+    _interp_mixture_kernel(j, fixed_u, tau, all_q, s)
+
+    # h_θ shift (1° ≤ θ ≤ 89°)
+    apply_transform = degree_deg <= VERT_THRESH
+    if apply_transform:
+        tan_theta = np.tan(np.deg2rad(degree_deg))
+        s += fixed_u / tan_theta
+
+    # ④ Sort
+    s.sort(axis=1)
+
+    # ⑤ h_{-θ} inverse transform
+    if apply_transform:
+        ranks = np.arange(1, n_samples + 1) / n_samples
+        s -= ranks[np.newaxis, :] / tan_theta
+
+    # ⑥ Extract output quantiles
+    return np.percentile(s, tau * 100, axis=1).T
+
+
+def _sampling_objective(
+    w, tau, quantile_arrays, observed, degree_deg,
+    fixed_u, fixed_v, reg_lambda,
+):
+    """CRPS objective using sampling-based combine with CRN.
+
+    Args:
+        w: Weight vector, shape (M,).
+        tau: Quantile levels, shape (Q,).
+        quantile_arrays: M arrays of shape (N, Q).
+        observed: Observed values, shape (N,).
+        degree_deg: Angle in degrees [0, 90].
+        fixed_u: Pre-drawn U(0,1), shape (N, S).
+        fixed_v: Pre-drawn U(0,1), shape (N, S).
+        reg_lambda: L2 regularization strength toward equal weights.
+
+    Returns:
+        float: CRPS + regularization penalty.
+
+    Example:
+        >>> loss = _sampling_objective(
+        ...     w, tau, qarrays, obs, 90.0, fixed_u, fixed_v, 0.0
+        ... )
+    """
+    q_combined = _sampling_combine_crn(
+        w, tau, quantile_arrays, degree_deg, fixed_u, fixed_v
+    )
+    loss = crps_quantile(tau, q_combined, observed, reduction="mean")
+    if reg_lambda > 0:
+        M = len(w)
+        loss += reg_lambda * np.sum((w - 1.0 / M) ** 2)
+    return loss
+
+
+# =====================================================================
+# Grid-based combining (legacy, retained for reference/testing)
+# =====================================================================
 
 
 def _cdf_from_quantiles(
@@ -47,7 +334,7 @@ def _cdf_from_quantiles(
     )
 
 
-def _batch_cdf_eval(x_grid, qvals, tau):
+def _batch_cdf_eval_grid(x_grid, qvals, tau):
     """Evaluate CDF at x_grid for all timesteps (vectorized).
 
     For each row n, computes CDF_n(x) = interp(x, qvals[n], tau)
@@ -93,7 +380,7 @@ def _batch_cdf_eval(x_grid, qvals, tau):
     return result
 
 
-def _batch_cdf_invert(tau, cdf, x_grid):
+def _batch_cdf_invert_grid(tau, cdf, x_grid):
     """Invert combined CDF to get quantiles (vectorized).
 
     For each row n, computes interp(tau, cdf[n], x_grid[n]).
@@ -134,7 +421,7 @@ def _batch_cdf_invert(tau, cdf, x_grid):
     return x_lo + t * (x_hi - x_lo)
 
 
-def _vertical_combine_quantiles(w, tau, quantile_arrays):
+def _vertical_combine_quantiles_grid(w, tau, quantile_arrays):
     """Compute combined quantiles via CDF averaging for given weights.
 
     Vectorized implementation: evaluates all N timesteps in parallel
@@ -182,14 +469,14 @@ def _vertical_combine_quantiles(w, tau, quantile_arrays):
     G = x_grid.shape[1]
     combined_cdf = np.zeros((N, G), dtype=float)
     for i in range(M):
-        combined_cdf += w[i] * _batch_cdf_eval(x_grid, all_q[i], tau)
+        combined_cdf += w[i] * _batch_cdf_eval_grid(x_grid, all_q[i], tau)
 
     # Invert combined CDF to get output quantiles
-    return _batch_cdf_invert(tau, combined_cdf, x_grid)
+    return _batch_cdf_invert_grid(tau, combined_cdf, x_grid)
 
 
-def _vertical_objective(w, tau, quantile_arrays, observed, reg_lambda):
-    """CRPS objective for vertical (CDF averaging) combining.
+def _vertical_objective_grid(w, tau, quantile_arrays, observed, reg_lambda):
+    """CRPS objective for vertical combining using grid-based CDF averaging.
 
     Args:
         w: Weight vector, shape (M,).
@@ -202,11 +489,11 @@ def _vertical_objective(w, tau, quantile_arrays, observed, reg_lambda):
         float: CRPS + regularization penalty.
 
     Example:
-        >>> loss = _vertical_objective(
+        >>> loss = _vertical_objective_grid(
         ...     np.array([0.6, 0.4]), tau, qarrays, obs, 0.0
         ... )
     """
-    q_combined = _vertical_combine_quantiles(w, tau, quantile_arrays)
+    q_combined = _vertical_combine_quantiles_grid(w, tau, quantile_arrays)
     loss = crps_quantile(tau, q_combined, observed, reduction="mean")
     if reg_lambda > 0:
         M = len(w)
@@ -215,7 +502,7 @@ def _vertical_objective(w, tau, quantile_arrays, observed, reg_lambda):
 
 
 class VerticalCombiner(BaseCombiner):
-    """CDF weighted average (Linear Pool).
+    """CDF weighted average (Linear Pool) via mixture sampling.
 
     F_combined(x) = sum_i w_i * F_i(x)
 
@@ -223,11 +510,10 @@ class VerticalCombiner(BaseCombiner):
     generally wider than the individual distributions, which helps
     when individual models are under-dispersed.
 
-    Implementation:
-        1. Build a common x grid from pooled quantile values
-        2. Evaluate each model's CDF on the grid
-        3. Weighted-average the CDFs
-        4. Invert the combined CDF to obtain output quantiles
+    Implementation uses the simulation algorithm from Taylor & Meng
+    (2025, Online Appendix C): vertical combining is a mixture
+    distribution, so it is implemented via categorical model
+    selection + quantile inversion + sorting.
 
     Args:
         n_quantiles: Number of output quantile levels (default 99).
@@ -241,6 +527,8 @@ class VerticalCombiner(BaseCombiner):
             - "inverse_crps": Heuristic inverse-CRPS weighting.
         reg_lambda: L2 regularization toward equal weights (default 0.0).
         val_ratio: Fraction of data for temporal validation (default 0.0).
+        n_samples: Number of Monte Carlo samples for mixture
+            sampling (default 5000).
 
     Example:
         >>> combiner = VerticalCombiner(
@@ -258,6 +546,7 @@ class VerticalCombiner(BaseCombiner):
         fit_method: str = "optimize",
         reg_lambda: float = 0.0,
         val_ratio: float = 0.0,
+        n_samples: int = 5000,
     ):
         super().__init__(
             n_quantiles=n_quantiles, n_jobs=n_jobs, val_ratio=val_ratio
@@ -272,6 +561,7 @@ class VerticalCombiner(BaseCombiner):
             )
         self.fit_method = fit_method
         self.reg_lambda = reg_lambda
+        self.n_samples = n_samples
 
     def _fit_horizon(
         self,
@@ -281,14 +571,9 @@ class VerticalCombiner(BaseCombiner):
     ) -> np.ndarray:
         """Learn combining weights for a single horizon.
 
-        Dispatches to inverse-CRPS heuristic or SLSQP optimization
-        based on ``fit_method``. User-specified weights always take
-        precedence.
-
-        The vertical CRPS objective is convex w.r.t. weights
-        (Theorem 3, Taylor & Meng 2025), so SLSQP with
-        finite-difference gradients reliably finds the global
-        optimum from the inverse-CRPS warm start.
+        Uses sampling-based CRPS objective with Common Random Numbers
+        (CRN) for deterministic optimization. Dispatches to
+        inverse-CRPS heuristic or SLSQP based on ``fit_method``.
 
         Args:
             h: Forecast horizon (1-indexed).
@@ -314,13 +599,21 @@ class VerticalCombiner(BaseCombiner):
         if self.fit_method == "inverse_crps":
             return x0
 
-        # SLSQP optimization with inverse-CRPS warm start
+        # Pre-draw CRN variates for deterministic objective
+        N = quantile_arrays[0].shape[0]
+        rng = np.random.default_rng(42 + h)
+        fixed_u = rng.uniform(0, 1, size=(N, self.n_samples))
+        fixed_v = rng.uniform(0, 1, size=(N, self.n_samples))
+
         M = len(quantile_arrays)
 
         result = minimize(
-            _vertical_objective,
+            _sampling_objective,
             x0,
-            args=(tau, quantile_arrays, observed, self.reg_lambda),
+            args=(
+                tau, quantile_arrays, observed, 90.0,
+                fixed_u, fixed_v, self.reg_lambda,
+            ),
             method="SLSQP",
             bounds=[(0.0, 1.0)] * M,
             constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1.0}],
@@ -352,13 +645,11 @@ class VerticalCombiner(BaseCombiner):
         h: int,
         quantile_arrays: List[np.ndarray],
     ) -> np.ndarray:
-        """CDF weighted average with quantile inversion.
+        """CDF weighted average via mixture sampling.
 
-        For each time step:
-            1. Build a common x grid from pooled quantile values
-            2. Evaluate each model's CDF via quantile interpolation
-            3. Compute F_combined(x) = sum w_i F_i(x)
-            4. Invert to find quantiles at self.quantile_levels
+        Uses the simulation algorithm from Taylor & Meng (2025):
+        vertical combining is a mixture distribution, so we sample
+        from the mixture, sort, and extract quantiles.
 
         Args:
             h: Forecast horizon (1-indexed).
@@ -373,6 +664,7 @@ class VerticalCombiner(BaseCombiner):
             (100, 99)
         """
         weights = self.weights_[h]  # (M,)
-        return _vertical_combine_quantiles(
-            weights, self.quantile_levels, quantile_arrays
+        return _sampling_combine(
+            weights, self.quantile_levels, quantile_arrays,
+            degree_deg=90.0, n_samples=self.n_samples,
         )

@@ -6,6 +6,7 @@ into a single combined forecast using various strategies.
 
 from .angular import AngularCombiner
 from .base import BaseCombiner
+from .deterministic import DeterministicCombiner
 from .equal_weight import EqualWeightCombiner
 from .horizontal import HorizontalCombiner
 from .vertical import VerticalCombiner
@@ -13,6 +14,7 @@ from .vertical import VerticalCombiner
 __all__ = [
     "AngularCombiner",
     "BaseCombiner",
+    "DeterministicCombiner",
     "EqualWeightCombiner",
     "HorizontalCombiner",
     "VerticalCombiner",
